@@ -1,190 +1,190 @@
 import { create } from 'zustand'
 
 export const useCampaignStore = create((set, get) => ({
-  // Campaign state
-  campaignId: null,
-  status: 'idle', // idle, searching, calling, complete, cancelled, failed
-  startedAt: null,
-  completedAt: null,
-  
-  // Calls state
-  calls: [], // { providerId, providerName, status, transcript, offeredSlot, score, duration }
-  activeCalls: 0,
-  completedCalls: 0,
-  
-  // Results
-  rankedResults: [],
-  bestMatch: null,
-  
-  // WebSocket
-  wsConnected: false,
-  
-  // Actions
-  setCampaign: (campaignId) => set({ 
-    campaignId, 
-    status: 'searching',
-    startedAt: new Date().toISOString(),
-    calls: [],
-    rankedResults: [],
-    bestMatch: null
+  groupId: null,
+  status: 'idle', // idle | searching | calling | completed | error
+  message: '',
+  campaigns: {},   // campaignId → {service_type, status, providers, results, bestMatch}
+  calls: {},       // providerId → {status, name, rating, distance, transcript, slot, ...}
+  origin: null,    // {lat, lng}
+
+  reset: () => set({
+    groupId: null, status: 'idle', message: '',
+    campaigns: {}, calls: {}, origin: null,
   }),
 
-  setStatus: (status) => set({ status }),
-  
-  setWsConnected: (connected) => set({ wsConnected: connected }),
+  setGroupId: (id) => set({ groupId: id }),
 
-  // Handle WebSocket messages
-  handleMessage: (message) => {
-    const state = get()
-    
-    switch (message.type) {
+  handleWsMessage: (msg) => {
+    const s = get()
+    switch (msg.type) {
+      case 'campaign_status':
+        set({
+          status: msg.status,
+          message: msg.message || '',
+          campaigns: {
+            ...s.campaigns,
+            [msg.campaign_id]: { ...s.campaigns[msg.campaign_id], status: msg.status }
+          }
+        })
+        break
+
+      case 'providers_found':
+        set({
+          origin: msg.origin,
+          campaigns: {
+            ...s.campaigns,
+            [msg.campaign_id]: {
+              ...s.campaigns[msg.campaign_id],
+              providers: msg.providers,
+            }
+          }
+        })
+        // Init call cards
+        const newCalls = { ...s.calls }
+        msg.providers.forEach(p => {
+          newCalls[p.provider_id] = {
+            status: 'queued', name: p.name, rating: p.rating,
+            distance: p.distance_miles, photo: p.photo_url,
+            lat: p.lat, lng: p.lng, campaignId: msg.campaign_id,
+          }
+        })
+        set({ calls: newCalls })
+        break
+
       case 'call_started':
         set({
-          calls: [...state.calls, {
-            providerId: message.provider_id,
-            providerName: message.provider_name,
-            status: 'ringing',
-            transcript: [],
-            offeredSlot: null,
-            score: null,
-            duration: 0,
-            startedAt: new Date().toISOString()
-          }],
-          activeCalls: state.activeCalls + 1
+          status: 'calling',
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              status: 'ringing', name: msg.provider_name,
+              rating: msg.provider_rating, distance: msg.provider_distance,
+              photo: msg.photo_url, campaignId: msg.campaign_id,
+            }
+          }
         })
         break
 
       case 'call_connected':
         set({
-          calls: state.calls.map(c => 
-            c.providerId === message.provider_id 
-              ? { ...c, status: 'connected' }
-              : c
-          )
-        })
-        break
-
-      case 'transcript_chunk':
-        set({
-          calls: state.calls.map(c => 
-            c.providerId === message.provider_id 
-              ? { 
-                  ...c, 
-                  transcript: [...c.transcript, { 
-                    speaker: message.speaker, 
-                    text: message.text,
-                    timestamp: new Date().toISOString()
-                  }]
-                }
-              : c
-          )
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              status: 'connected', conversationId: msg.conversation_id,
+            }
+          }
         })
         break
 
       case 'tool_called':
         set({
-          calls: state.calls.map(c => 
-            c.providerId === message.provider_id 
-              ? { ...c, status: 'negotiating', lastTool: message.tool }
-              : c
-          )
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              status: 'negotiating', lastTool: msg.tool,
+            }
+          }
         })
         break
 
-      case 'tool_result':
-        if (message.tool === 'check_calendar' && message.result?.available) {
-          set({
-            calls: state.calls.map(c => 
-              c.providerId === message.provider_id 
-                ? { ...c, offeredSlot: message.result.slot }
-                : c
-            )
-          })
-        }
+      case 'booking_confirmed':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              status: 'booked',
+              slot: { date: msg.date, time: msg.time },
+              serviceType: msg.service_type,
+            }
+          }
+        })
         break
 
-      case 'call_completed':
-        const completedCall = state.calls.find(c => c.providerId === message.provider_id)
-        const duration = completedCall 
-          ? (new Date() - new Date(completedCall.startedAt)) / 1000 
-          : 0
-        
+      case 'no_availability':
         set({
-          calls: state.calls.map(c => 
-            c.providerId === message.provider_id 
-              ? { 
-                  ...c, 
-                  status: message.status, // 'booked', 'no_availability', 'failed'
-                  duration,
-                  result: message.result,
-                  score: message.result?.score
-                }
-              : c
-          ),
-          activeCalls: Math.max(0, state.activeCalls - 1),
-          completedCalls: state.completedCalls + 1
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              status: 'no_availability', reason: msg.reason,
+            }
+          }
+        })
+        break
+
+      case 'call_ended':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              status: s.calls[msg.provider_id]?.status === 'booked'
+                ? 'booked' : 'completed',
+              transcript: msg.transcript || s.calls[msg.provider_id]?.transcript || [],
+            }
+          }
+        })
+        break
+
+      case 'transcript_loaded':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              transcript: msg.transcript || [],
+            }
+          }
+        })
+        break
+
+      case 'call_failed':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              status: 'failed', error: msg.error,
+            }
+          }
+        })
+        break
+
+      case 'call_skipped':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              status: 'skipped', reason: msg.reason,
+            }
+          }
         })
         break
 
       case 'campaign_complete':
         set({
-          status: 'complete',
-          completedAt: new Date().toISOString(),
-          rankedResults: message.ranked_results || [],
-          bestMatch: message.ranked_results?.[0] || null
+          status: 'completed',
+          campaigns: {
+            ...s.campaigns,
+            [msg.campaign_id]: {
+              ...s.campaigns[msg.campaign_id],
+              status: 'completed',
+              results: msg.results,
+              bestMatch: msg.best_match,
+            }
+          }
         })
         break
 
-      default:
-        console.log('Unknown message type:', message.type)
+      case 'campaign_error':
+        set({ status: 'error', message: msg.error })
+        break
     }
   },
-
-  // Confirm a booking
-  confirmBooking: async (providerId) => {
-    const state = get()
-    try {
-      const response = await fetch(`http://localhost:8000/api/campaign/${state.campaignId}/confirm`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider_id: providerId })
-      })
-      
-      if (!response.ok) throw new Error('Confirmation failed')
-      
-      const result = await response.json()
-      set({ status: 'confirmed', confirmedBooking: result })
-      return result
-    } catch (error) {
-      console.error('Confirm booking error:', error)
-      throw error
-    }
-  },
-
-  // Cancel campaign
-  cancelCampaign: async () => {
-    const state = get()
-    try {
-      await fetch(`http://localhost:8000/api/campaign/${state.campaignId}/cancel`, {
-        method: 'POST'
-      })
-      set({ status: 'cancelled' })
-    } catch (error) {
-      console.error('Cancel campaign error:', error)
-    }
-  },
-
-  // Reset
-  reset: () => set({
-    campaignId: null,
-    status: 'idle',
-    startedAt: null,
-    completedAt: null,
-    calls: [],
-    activeCalls: 0,
-    completedCalls: 0,
-    rankedResults: [],
-    bestMatch: null,
-    wsConnected: false
-  })
 }))

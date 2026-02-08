@@ -1,197 +1,173 @@
 """
 Tool webhook endpoints — ElevenLabs agent calls these mid-conversation.
-Now with raw request logging (to debug ElevenLabs format) and Google Calendar integration.
+Includes campaign tracking + Google Calendar integration.
 """
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime
+import asyncio
 import logging
 import json
-
-from app.tools.calendar_tool import CalendarService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# In-memory store for confirmed bookings
 confirmed_bookings = []
-
-# Google Calendar service (initialized lazily)
-_calendar_service: Optional[CalendarService] = None
+_calendar_service = None
 
 
-def get_calendar() -> CalendarService:
+def get_calendar():
     global _calendar_service
     if _calendar_service is None:
-        _calendar_service = CalendarService()
+        try:
+            from app.tools.calendar_tool import CalendarService
+            _calendar_service = CalendarService()
+        except Exception as e:
+            logger.warning(f"⚠️ Calendar not available: {e}")
     return _calendar_service
 
 
-# ---- Request Models ----
-class CheckCalendarRequest(BaseModel):
-    proposed_date: str
-    proposed_time: str
-    duration_minutes: Optional[int] = 60
-
-
-class ConfirmBookingRequest(BaseModel):
-    provider_name: str
-    appointment_date: str
-    appointment_time: str
-    service_type: str
-    notes: Optional[str] = ""
-
-
-class NoAvailabilityRequest(BaseModel):
-    provider_name: str
-    reason: str
-
-
-# ---- Helper: Parse any request format ----
-async def parse_request_body(request: Request) -> dict:
-    """
-    ElevenLabs may send data in unexpected formats.
-    This helper logs the raw body and tries to parse it flexibly.
-    """
-    raw_body = await request.body()
-    raw_text = raw_body.decode("utf-8", errors="replace")
-    logger.info(f"🔍 RAW REQUEST BODY: {raw_text}")
-    logger.info(f"🔍 HEADERS: {dict(request.headers)}")
-
+async def parse_body(request: Request) -> dict:
+    raw = await request.body()
+    text = raw.decode("utf-8", errors="replace")
+    logger.info(f"🔍 RAW BODY: {text}")
     try:
-        data = json.loads(raw_text)
+        data = json.loads(text)
     except json.JSONDecodeError:
-        logger.error(f"❌ Failed to parse JSON: {raw_text}")
         data = {}
-
-    # ElevenLabs sometimes nests params under a key
-    # Try to flatten common patterns
     if "properties" in data and isinstance(data["properties"], dict):
         data = data["properties"]
     if "parameters" in data and isinstance(data["parameters"], dict):
         data = data["parameters"]
-
-    logger.info(f"🔍 PARSED DATA: {data}")
+    logger.info(f"🔍 PARSED: {data}")
     return data
 
 
-# ---- Endpoints ----
+def _track_campaign(campaign_id: str, provider_id: str, result_data: dict, broadcast_data: dict):
+    """Update campaign state and broadcast to frontend."""
+    if not campaign_id:
+        return
+    try:
+        from app.agents.swarm_orchestrator import CampaignManager
+        from app.routes.ws import broadcast
+        group_id = CampaignManager.update_provider_result(campaign_id, provider_id, result_data)
+        if group_id:
+            asyncio.create_task(broadcast(group_id, broadcast_data))
+    except Exception as e:
+        logger.error(f"⚠️ Campaign tracking error: {e}")
+
 
 @router.post("/check-calendar")
 async def check_calendar(request: Request):
-    """Called by ElevenLabs agent when a provider offers a time slot."""
-    data = await parse_request_body(request)
+    data = await parse_body(request)
+    date = data.get("proposed_date", "")
+    time = data.get("proposed_time", "")
+    dur = data.get("duration_minutes", 60)
+    cid = data.get("campaign_id", "")
+    pid = data.get("provider_id", "")
 
-    proposed_date = data.get("proposed_date", "")
-    proposed_time = data.get("proposed_time", "")
-    duration_minutes = data.get("duration_minutes", 60)
+    if not date or not time:
+        return {"available": True, "message": "Could not parse date/time, assuming available."}
 
-    if not proposed_date or not proposed_time:
-        logger.warning(f"⚠️ Missing date/time in request: {data}")
-        return {
-            "available": True,
-            "message": "Could not parse date/time, assuming available. Please confirm the slot."
-        }
+    logger.info(f"📅 Calendar check: {date} at {time} ({dur}min) [campaign={cid}]")
 
-    logger.info(f"📅 Calendar check: {proposed_date} at {proposed_time} ({duration_minutes}min)")
+    # Track the tool call
+    _track_campaign(cid, pid, {}, {
+        "type": "tool_called", "campaign_id": cid, "provider_id": pid,
+        "tool": "check_calendar", "params": {"date": date, "time": time}
+    })
 
-    # Try real Google Calendar check
+    # Try real Google Calendar
     try:
-        calendar = get_calendar()
-        is_available = calendar.check_availability(proposed_date, proposed_time, duration_minutes)
-
-        if not is_available:
-            return {
-                "available": False,
-                "message": f"The user has a conflict on {proposed_date} at {proposed_time}. Please ask for an alternative time."
-            }
-        else:
-            return {
-                "available": True,
-                "message": f"The user is free on {proposed_date} at {proposed_time}. You may proceed to confirm this slot."
-            }
+        cal = get_calendar()
+        if cal:
+            available = cal.check_availability(date, time, dur)
+            if not available:
+                return {"available": False, "message": f"Conflict on {date} at {time}. Ask for alternative."}
+            return {"available": True, "message": f"User is free on {date} at {time}. Proceed to confirm."}
     except Exception as e:
-        logger.warning(f"⚠️ Google Calendar error (falling back to mock): {e}")
-        # Fallback: mock logic — busy at 2 PM
-        is_busy = proposed_time.startswith("14:")
-        if is_busy:
-            return {
-                "available": False,
-                "message": f"The user has a conflict on {proposed_date} at {proposed_time}. Please ask for an alternative time."
-            }
-        return {
-            "available": True,
-            "message": f"The user is free on {proposed_date} at {proposed_time}. You may proceed to confirm this slot."
-        }
+        logger.warning(f"⚠️ Calendar fallback: {e}")
+
+    # Fallback mock: busy at 2 PM
+    if time.startswith("14:"):
+        return {"available": False, "message": f"Conflict on {date} at {time}. Ask for alternative."}
+    return {"available": True, "message": f"User is free on {date} at {time}. Proceed to confirm."}
 
 
 @router.post("/confirm-booking")
 async def confirm_booking(request: Request):
-    """Called by ElevenLabs agent after both parties agree on a slot."""
-    data = await parse_request_body(request)
-
-    provider_name = data.get("provider_name", "Unknown Provider")
-    appointment_date = data.get("appointment_date", "")
-    appointment_time = data.get("appointment_time", "")
-    service_type = data.get("service_type", "Appointment")
+    data = await parse_body(request)
+    cid = data.get("campaign_id", "")
+    pid = data.get("provider_id", "")
+    name = data.get("provider_name", "Unknown")
+    date = data.get("appointment_date", "")
+    time = data.get("appointment_time", "")
+    svc = data.get("service_type", "Appointment")
     notes = data.get("notes", "")
 
-    logger.info(f"✅ Booking confirmed: {provider_name} on {appointment_date} at {appointment_time}")
+    logger.info(f"✅ Booking: {name} on {date} at {time} [campaign={cid}]")
 
     booking = {
         "id": len(confirmed_bookings) + 1,
-        "provider_name": provider_name,
-        "date": appointment_date,
-        "time": appointment_time,
-        "service": service_type,
-        "notes": notes,
+        "provider_name": name, "date": date, "time": time,
+        "service": svc, "notes": notes,
         "confirmed_at": datetime.utcnow().isoformat(),
-        "calendar_event_id": None
+        "calendar_event_id": None,
     }
 
-    # Try to create Google Calendar event
+    # Create Google Calendar event
     try:
-        calendar = get_calendar()
-        event_id = calendar.create_event(
-            summary=f"{service_type} at {provider_name}",
-            date_str=appointment_date,
-            time_str=appointment_time,
-            duration_minutes=60,
-            description=f"Booked by CallPilot\nProvider: {provider_name}\nService: {service_type}\nNotes: {notes}"
-        )
-        booking["calendar_event_id"] = event_id
-        logger.info(f"📆 Google Calendar event created: {event_id}")
+        cal = get_calendar()
+        if cal and date and time:
+            eid = cal.create_event(
+                summary=f"{svc} at {name}", date_str=date, time_str=time,
+                duration_minutes=60,
+                description=f"Booked by CallPilot\nProvider: {name}\nService: {svc}\nNotes: {notes}"
+            )
+            booking["calendar_event_id"] = eid
+            logger.info(f"📆 Calendar event: {eid}")
     except Exception as e:
-        logger.warning(f"⚠️ Could not create Google Calendar event: {e}")
+        logger.warning(f"⚠️ Calendar event error: {e}")
 
     confirmed_bookings.append(booking)
 
+    # Track in campaign
+    _track_campaign(cid, pid, {
+        "status": "booked", "provider_name": name,
+        "offered_slot": {"date": date, "time": time},
+        "service_type": svc, "notes": notes,
+    }, {
+        "type": "booking_confirmed", "campaign_id": cid, "provider_id": pid,
+        "provider_name": name, "date": date, "time": time, "service_type": svc,
+    })
+
     return {
-        "success": True,
-        "message": f"Appointment confirmed with {provider_name} on {appointment_date} at {appointment_time} for {service_type}.",
-        "booking_id": booking["id"],
-        "calendar_event_created": booking["calendar_event_id"] is not None
+        "success": True, "booking_id": booking["id"],
+        "message": f"Booked with {name} on {date} at {time} for {svc}.",
+        "calendar_event_created": booking["calendar_event_id"] is not None,
     }
 
 
 @router.post("/no-availability")
 async def no_availability(request: Request):
-    """Called by ElevenLabs agent when a provider has no suitable slots."""
-    data = await parse_request_body(request)
-
-    provider_name = data.get("provider_name", "Unknown Provider")
+    data = await parse_body(request)
+    cid = data.get("campaign_id", "")
+    pid = data.get("provider_id", "")
+    name = data.get("provider_name", "Unknown")
     reason = data.get("reason", "No reason given")
 
-    logger.info(f"❌ No availability: {provider_name} — {reason}")
+    logger.info(f"❌ No availability: {name} — {reason} [campaign={cid}]")
 
-    return {
-        "success": True,
-        "message": f"Noted that {provider_name} has no availability. Reason: {reason}. You may now end the call politely."
-    }
+    _track_campaign(cid, pid, {
+        "status": "no_availability", "provider_name": name, "reason": reason,
+    }, {
+        "type": "no_availability", "campaign_id": cid, "provider_id": pid,
+        "provider_name": name, "reason": reason,
+    })
+
+    return {"success": True, "message": f"{name} has no availability: {reason}"}
 
 
 @router.get("/bookings")
 async def list_bookings():
-    """View all confirmed bookings (for debugging/demo)."""
     return {"bookings": confirmed_bookings, "total": len(confirmed_bookings)}
