@@ -1,6 +1,7 @@
 """Campaign start/status/cancel/confirm endpoints."""
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from app.agents.swarm_orchestrator import CampaignManager
+from app.routes.auth import verify_token
 import logging
 
 router = APIRouter()
@@ -8,10 +9,22 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/start")
-async def start_campaign(request: dict):
+async def start_campaign(request: Request):
     """Start a campaign group. Returns immediately; calls happen in background."""
-    logger.info(f"🚀 Campaign start request: {request}")
-    group = await CampaignManager.start_campaign_group(request)
+    data = await request.json()
+    
+    # Try to get user_id from auth token (optional - allows unauthenticated use)
+    user_id = "default"
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+        extracted_id = verify_token(token)
+        if extracted_id:
+            user_id = extracted_id
+            logger.info(f"🔐 Authenticated user: {user_id}")
+    
+    logger.info(f"🚀 Campaign start request for user {user_id}: {data}")
+    group = await CampaignManager.start_campaign_group(data, user_id=user_id)
     return {
         "group_id": group["group_id"],
         "status": "started",

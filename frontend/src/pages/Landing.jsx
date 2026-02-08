@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Phone, Zap, MapPin, Calendar, Clock, Shield, ArrowRight, CheckCircle } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
+import { api } from '../services/api'
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
 
@@ -27,7 +28,19 @@ export default function Landing() {
         document.body.appendChild(s)
     }, [])
 
-    function handleAuth(r) {
+    async function handleAuth(r) {
+        try {
+            // Call backend auth endpoint to save user to database
+            const res = await api.googleAuth(r.credential)
+            if (res.token && res.user) {
+                setUser(res.user, res.token)
+                navigate('/dashboard')
+                return
+            }
+        } catch (e) {
+            console.warn('Backend auth failed, using client-side decode:', e)
+        }
+        // Fallback: client-side decode (works but user not saved to DB)
         const p = JSON.parse(atob(r.credential.split('.')[1]))
         setUser({ name: p.name, email: p.email, picture: p.picture, sub: p.sub }, r.credential)
         navigate('/dashboard')

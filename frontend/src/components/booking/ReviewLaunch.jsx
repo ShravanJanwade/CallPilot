@@ -30,7 +30,7 @@ export default function ReviewLaunch() {
         try {
             const formData = booking.getFormData()
 
-            const response = await fetch('http://localhost:8000/api/campaign/start', {
+            const response = await fetch('http://localhost:8080/api/campaign/start', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -97,7 +97,6 @@ export default function ReviewLaunch() {
                     Make sure everything looks good before starting
                 </p>
 
-                {/* Summary */}
                 <div className="space-y-4 mb-6">
                     {summaryItems.map((item, index) => (
                         <div key={index} className="flex items-start gap-3 p-3 bg-gray-50 rounded-lg">
@@ -112,7 +111,6 @@ export default function ReviewLaunch() {
                     ))}
                 </div>
 
-                {/* Preferred Providers */}
                 {booking.preferredProviders.length > 0 && (
                     <div className="p-4 bg-primary/5 rounded-xl border border-primary/20 mb-6">
                         <p className="text-sm font-medium text-primary mb-2">
@@ -128,7 +126,6 @@ export default function ReviewLaunch() {
                     </div>
                 )}
 
-                {/* What happens next */}
                 <div className="p-4 bg-gray-50 rounded-xl">
                     <p className="text-sm font-medium text-gray-800 mb-2">What happens next?</p>
                     <ol className="text-sm text-gray-600 space-y-1">
@@ -139,7 +136,6 @@ export default function ReviewLaunch() {
                     </ol>
                 </div>
 
-                {/* Error */}
                 {error && (
                     <div className="mt-4 p-4 bg-error/10 border border-error/30 rounded-xl">
                         <p className="text-sm text-error">{error}</p>
@@ -147,7 +143,6 @@ export default function ReviewLaunch() {
                 )}
             </div>
 
-            {/* Navigation */}
             <div className="mt-6 flex justify-between">
                 <button
                     onClick={booking.prevStep}

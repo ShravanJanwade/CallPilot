@@ -48,10 +48,33 @@ async def handle_post_call(request: Request):
             elif isinstance(transcript, str):
                 formatted = [{"role": "system", "message": transcript, "time": 0}]
 
-            CampaignManager.update_provider_result(campaign_id, provider_id, {
+            # Now awaited since update_provider_result is async
+            await CampaignManager.update_provider_result(campaign_id, provider_id, {
                 "transcript": formatted,
                 "analysis": analysis,
             })
+
+            # --- DB PERSISTENCE: Save transcript to call record ---
+            try:
+                from app import database as db
+                db_call_id = mapping.get("db_call_id")
+                if db_call_id:
+                    update_data = {
+                        "transcript": json.dumps(formatted),
+                        "ended_at": json.dumps(metadata.get("ended_at")) if metadata.get("ended_at") else None,
+                    }
+                    # Calculate duration if we have timing info
+                    if formatted:
+                        last_time = max((f.get("time", 0) for f in formatted), default=0)
+                        if last_time > 0:
+                            update_data["duration_seconds"] = int(last_time)
+
+                    await db.update_call(db_call_id, update_data)
+                    logger.info(f"💾 Transcript saved to DB for call {db_call_id}")
+                else:
+                    logger.info(f"📝 No db_call_id for conversation {conv_id}, transcript in memory only")
+            except Exception as e:
+                logger.warning(f"⚠️ DB transcript save failed: {e}")
 
             asyncio.create_task(broadcast(group_id, {
                 "type": "transcript_loaded",

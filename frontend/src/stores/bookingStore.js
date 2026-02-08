@@ -79,7 +79,7 @@ export const useBookingStore = create((set, get) => ({
         radius_miles: String(state.maxDistance)
       })
       
-      const response = await fetch(`http://localhost:8000/api/providers/search?${params}`)
+      const response = await fetch(`http://localhost:8080/api/providers/search?${params}`)
       if (!response.ok) throw new Error('Provider search failed')
       
       const data = await response.json()
@@ -101,7 +101,6 @@ export const useBookingStore = create((set, get) => ({
     return {
       service_type: state.serviceType,
       description: state.description,
-      preferred_providers: state.preferredProviders,
       date_range_start: state.dateRangeStart,
       date_range_end: state.dateRangeEnd,
       time_preference: state.timePreference,
@@ -109,21 +108,16 @@ export const useBookingStore = create((set, get) => ({
       location: state.location,
       latitude: state.latitude,
       longitude: state.longitude,
-      max_distance_miles: state.maxDistance,
-      weights: {
-        availability: state.weightAvailability / 100,
-        rating: state.weightRating / 100,
-        distance: state.weightDistance / 100,
-        preference: state.weightPreference / 100
-      },
+      max_distance: state.maxDistance,
+      weight_availability: state.weightAvailability,
+      weight_rating: state.weightRating,
+      weight_distance: state.weightDistance,
+      weight_preference: state.weightPreference,
       max_providers: state.maxProviders,
-      agent_config: {
-        voice: state.agentVoice,
-        name: state.agentName,
-        first_message: state.firstMessage,
-        system_prompt: state.systemPrompt,
-        user_phone: state.userPhone
-      }
+      preferred_providers: state.preferredProviders,
+      agent_name: state.agentName,
+      first_message: state.firstMessage,
+      system_prompt: state.systemPrompt
     }
   }
 }))

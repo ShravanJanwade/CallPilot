@@ -26,6 +26,8 @@ class Settings(BaseSettings):
 
     # -- Auth --
     jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_expiration_hours: int = 24
 
     # -- Concurrency --
     max_parallel_calls: int = 15
@@ -36,6 +38,10 @@ class Settings(BaseSettings):
     weight_rating: float = 0.3
     weight_distance: float = 0.2
     weight_preference: float = 0.1
+
+    supabase_url: str = ""
+    supabase_anon_key: str = ""
+    supabase_service_role_key: str = ""
 
     # -- Spam Prevention --
     spam_prevent: bool = True
@@ -51,6 +57,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 

@@ -4,7 +4,8 @@ from contextlib import asynccontextmanager
 import logging
 
 from app.config import settings
-from app.routes import booking, providers, ws, tools, campaign, calendar_routes, webhooks
+from app.routes import booking, providers, ws, tools, campaign, calendar_routes, webhooks, auth
+from app.routes import settings as settings_routes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,10 +38,10 @@ app.include_router(campaign.router, prefix="/api/campaign", tags=["Campaign"])
 app.include_router(providers.router, prefix="/api/providers", tags=["Providers"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(tools.router, prefix="/api/tools", tags=["Agent Tools"])
-app.include_router(campaign.router, prefix="/api/campaign", tags=["Campaign"])
 app.include_router(calendar_routes.router, prefix="/api/calendar", tags=["Calendar"])
 app.include_router(webhooks.router, prefix="/api/webhooks", tags=["Webhooks"])
 app.include_router(ws.router)
+app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
 
 
 @app.get("/health")

@@ -11,6 +11,7 @@ import json
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+from app import database as db
 
 confirmed_bookings = []
 _calendar_service = None
@@ -43,14 +44,15 @@ async def parse_body(request: Request) -> dict:
     return data
 
 
-def _track_campaign(campaign_id: str, provider_id: str, result_data: dict, broadcast_data: dict):
+async def _track_campaign(campaign_id: str, provider_id: str, result_data: dict, broadcast_data: dict):
     """Update campaign state and broadcast to frontend."""
     if not campaign_id:
         return
     try:
         from app.agents.swarm_orchestrator import CampaignManager
         from app.routes.ws import broadcast
-        group_id = CampaignManager.update_provider_result(campaign_id, provider_id, result_data)
+        # update_provider_result is now async
+        group_id = await CampaignManager.update_provider_result(campaign_id, provider_id, result_data)
         if group_id:
             asyncio.create_task(broadcast(group_id, broadcast_data))
     except Exception as e:
@@ -71,8 +73,8 @@ async def check_calendar(request: Request):
 
     logger.info(f"📅 Calendar check: {date} at {time} ({dur}min) [campaign={cid}]")
 
-    # Track the tool call
-    _track_campaign(cid, pid, {}, {
+    # Track the tool call (now awaited)
+    await _track_campaign(cid, pid, {}, {
         "type": "tool_called", "campaign_id": cid, "provider_id": pid,
         "tool": "check_calendar", "params": {"date": date, "time": time}
     })
@@ -131,8 +133,67 @@ async def confirm_booking(request: Request):
 
     confirmed_bookings.append(booking)
 
-    # Track in campaign
-    _track_campaign(cid, pid, {
+    # --- DB PERSISTENCE: Save booking to database ---
+    try:
+        # Step 1: Find the provider in DB by place_id
+        provider_db = None
+        if pid and pid.strip():
+            provider_db = await db.get_provider_by_place_id(pid)
+
+        # Step 2: If not found by place_id, try to find by name
+        if not provider_db and name:
+            try:
+                supabase = db.get_supabase()
+                result = supabase.table("providers").select("*").eq("name", name).limit(1).execute()
+                if result.data:
+                    provider_db = result.data[0]
+                    logger.info(f"💾 Found provider by name: {name} → {provider_db['id']}")
+            except Exception:
+                pass
+
+        if provider_db and provider_db.get("id"):
+            booking_data = {
+                "provider_id": provider_db["id"],
+                "service_type": svc,
+                "appointment_date": date if date else datetime.utcnow().date().isoformat(),
+                "appointment_time": time if time else "09:00",
+                "notes": notes,
+                "calendar_event_id": booking.get("calendar_event_id"),
+                "status": "confirmed",
+            }
+
+            # Find user_id from the campaign mapping
+            user_id = None
+            try:
+                from app.agents.swarm_orchestrator import conversation_map, campaign_groups
+                # Try to find user_id from campaign group
+                for gid, group in campaign_groups.items():
+                    for camp in group.get("campaigns", []):
+                        if camp.get("campaign_id") == cid:
+                            user_id = group.get("user_id")
+                            # Also add campaign DB id if available
+                            if camp.get("db_id"):
+                                booking_data["campaign_id"] = camp["db_id"]
+                            break
+                    if user_id:
+                        break
+            except Exception as e:
+                logger.warning(f"⚠️ Could not find user_id from campaign: {e}")
+
+            # Only insert if we have a valid user_id (required by DB)
+            if user_id and user_id != "default" and len(str(user_id)) >= 32:
+                booking_data["user_id"] = user_id
+                db_booking = await db.create_booking(booking_data)
+                logger.info(f"💾 Booking saved to DB: {db_booking['id']} for {name}")
+            else:
+                logger.info(f"📝 Booking for {name} tracked in memory only (no valid user_id)")
+        else:
+            logger.info(f"📝 Booking for {name} tracked in memory (provider not in DB)")
+    except Exception as e:
+        logger.warning(f"⚠️ DB booking save failed: {e}", exc_info=True)
+
+    # Track in campaign (now awaited)
+    await _track_campaign(cid, pid, {
         "status": "booked", "provider_name": name,
         "offered_slot": {"date": date, "time": time},
         "service_type": svc, "notes": notes,
@@ -158,7 +219,8 @@ async def no_availability(request: Request):
 
     logger.info(f"❌ No availability: {name} — {reason} [campaign={cid}]")
 
-    _track_campaign(cid, pid, {
+    # Now awaited
+    await _track_campaign(cid, pid, {
         "status": "no_availability", "provider_name": name, "reason": reason,
     }, {
         "type": "no_availability", "campaign_id": cid, "provider_id": pid,

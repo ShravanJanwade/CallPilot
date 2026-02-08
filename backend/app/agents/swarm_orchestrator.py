@@ -5,13 +5,16 @@ Includes cross-call intelligence: later calls know about earlier offers.
 """
 import asyncio
 import uuid
+import json
 import logging
 from datetime import datetime
+from typing import Optional
 
 from app.tools.places_tool import PlacesService
 from app.tools.distance_tool import DistanceService
 from app.telephony.call_manager import trigger_outbound_call, get_call_number, get_conversation_details
 from app.scoring.ranker import rank_results
+from app import database as db
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,35 @@ class CampaignManager:
         for campaign in group["campaigns"]:
             asyncio.create_task(CampaignManager._run_campaign(group_id, campaign))
 
+        # --- DB PERSISTENCE: Save campaigns to database ---
+        for campaign in group["campaigns"]:
+            try:
+                if user_id and user_id != "default" and len(user_id) >= 32:
+                    db_campaign = await db.create_campaign({
+                        "user_id": user_id,
+                        "service_type": campaign["service_type"],
+                        "location_address": campaign["location"],
+                        "latitude": campaign.get("origin_lat", 0),
+                        "longitude": campaign.get("origin_lng", 0),
+                        "max_distance": campaign["max_distance"],
+                        "max_providers": campaign["max_providers"],
+                        "weights": json.dumps(campaign.get("preferences", {})),
+                        "agent_config": json.dumps({
+                            "name": "Alex",
+                            "first_message": "",
+                            "system_prompt": None
+                        }),
+                        "status": "running",
+                        "date_range_start": datetime.utcnow().date().isoformat(),
+                        "date_range_end": datetime.utcnow().date().isoformat(),
+                    })
+                    campaign["db_id"] = db_campaign.get("id")
+                    logger.info(f"💾 Campaign {campaign['campaign_id']} saved to DB: {campaign['db_id']}")
+                else:
+                    logger.info(f"📝 Campaign {campaign['campaign_id']} running in memory (no auth)")
+            except Exception as e:
+                logger.warning(f"⚠️ DB save skipped for campaign: {e}")
+
         return group
 
     @staticmethod
@@ -121,6 +153,27 @@ class CampaignManager:
             providers = providers[:campaign["max_providers"]]
             campaign["providers"] = providers
 
+            # --- DB PERSISTENCE: Cache providers in database ---
+            for prov in providers:
+                try:
+                    db_prov = await db.upsert_provider({
+                        "place_id": prov["provider_id"],
+                        "name": prov["name"],
+                        "phone": prov.get("phone") or prov.get("international_phone") or "",
+                        "address": prov.get("address", ""),
+                        "category": svc,
+                        "latitude": prov.get("lat", 0),
+                        "longitude": prov.get("lng", 0),
+                        "rating": prov.get("rating"),
+                        "total_ratings": prov.get("total_ratings", 0),
+                    })
+                    prov["db_id"] = db_prov["id"]
+                    logger.info(f"💾 Provider saved: {prov['name']} → {db_prov['id']}")
+                except Exception as e:
+                    logger.warning(f"⚠️ DB upsert failed for provider {prov['name']}: {e}")
+
+            await asyncio.sleep(0.2)
+
             await _broadcast(group_id, {
                 "type": "providers_found", "campaign_id": cid,
                 "providers": providers, "origin": {"lat": lat, "lng": lng}
@@ -145,7 +198,7 @@ class CampaignManager:
                     CampaignManager._make_call(group_id, cid, prov, i, campaign)
                 )
                 tasks.append(t)
-                await asyncio.sleep(1.5)  # Stagger calls slightly
+                await asyncio.sleep(1.5)
 
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -161,6 +214,20 @@ class CampaignManager:
             if booked:
                 campaign["best_match"] = booked[0]
 
+            # 💾 Update campaign status in DB
+            try:
+                db_campaign_id = campaign.get("db_id")
+                if db_campaign_id:
+                    await db.update_campaign(db_campaign_id, {
+                        "status": "completed",
+                        "completed_at": datetime.utcnow().isoformat(),
+                        "latitude": campaign.get("origin_lat", 0),
+                        "longitude": campaign.get("origin_lng", 0),
+                    })
+                    logger.info(f"💾 Campaign {db_campaign_id} marked completed in DB")
+            except Exception as e:
+                logger.warning(f"⚠️ DB campaign update failed: {e}")
+
             await _broadcast(group_id, {
                 "type": "campaign_complete", "campaign_id": cid,
                 "results": campaign["results"], "best_match": campaign["best_match"],
@@ -170,6 +237,18 @@ class CampaignManager:
         except Exception as e:
             logger.error(f"❌ Campaign {cid} error: {e}", exc_info=True)
             campaign["status"] = "error"
+
+            # 💾 Update campaign status in DB
+            try:
+                db_campaign_id = campaign.get("db_id")
+                if db_campaign_id:
+                    await db.update_campaign(db_campaign_id, {
+                        "status": "failed",
+                        "completed_at": datetime.utcnow().isoformat(),
+                    })
+            except Exception as db_e:
+                logger.warning(f"⚠️ DB campaign error update failed: {db_e}")
+
             await _broadcast(group_id, {
                 "type": "campaign_error", "campaign_id": cid, "error": str(e)
             })
@@ -219,10 +298,29 @@ class CampaignManager:
             conversation_map[conv_id] = {
                 "group_id": group_id, "campaign_id": campaign_id, "provider_id": pid
             }
+
+            # 💾 Persist call to Supabase
+            try:
+                db_campaign_id = campaign.get("db_id")
+                db_provider_id = provider.get("db_id")
+                if db_campaign_id and db_provider_id:
+                    db_call = await db.create_call({
+                        "campaign_id": db_campaign_id,
+                        "provider_id": db_provider_id,
+                        "status": "connected",
+                        "started_at": datetime.utcnow().isoformat(),
+                        "transcript": json.dumps([]),
+                    })
+                    conversation_map[conv_id]["db_call_id"] = db_call["id"]
+                    logger.info(f"💾 Call saved to DB: {db_call['id']}")
+            except Exception as e:
+                logger.warning(f"⚠️ DB call insert failed: {e}")
+
             await _broadcast(group_id, {
                 "type": "call_connected", "campaign_id": campaign_id,
                 "provider_id": pid, "conversation_id": conv_id,
             })
+
             await CampaignManager._wait_for_completion(group_id, campaign_id, pid, conv_id, campaign)
         else:
             logger.error(f"❌ Call to {name} failed: {result.get('error')}")
@@ -230,6 +328,23 @@ class CampaignManager:
                 "provider_id": pid, "provider_name": name,
                 "status": "failed", "error": result.get("error"),
             })
+
+            # 💾 Persist failed call to DB
+            try:
+                db_campaign_id = campaign.get("db_id")
+                db_provider_id = provider.get("db_id")
+                if db_campaign_id and db_provider_id:
+                    await db.create_call({
+                        "campaign_id": db_campaign_id,
+                        "provider_id": db_provider_id,
+                        "status": "failed",
+                        "started_at": datetime.utcnow().isoformat(),
+                        "ended_at": datetime.utcnow().isoformat(),
+                        "transcript": json.dumps([]),
+                    })
+            except Exception as e:
+                logger.warning(f"⚠️ DB failed-call insert failed: {e}")
+
             await _broadcast(group_id, {
                 "type": "call_failed", "campaign_id": campaign_id,
                 "provider_id": pid, "provider_name": name, "error": result.get("error", ""),
@@ -271,7 +386,7 @@ class CampaignManager:
                             })
 
                     if formatted_transcript:
-                        CampaignManager.update_provider_result(campaign_id, provider_id, {
+                        await CampaignManager.update_provider_result(campaign_id, provider_id, {
                             "transcript": formatted_transcript,
                         })
 
@@ -302,16 +417,44 @@ class CampaignManager:
         return campaign_groups.get(group_id)
 
     @staticmethod
-    def update_provider_result(campaign_id: str, provider_id: str, result_data: dict):
-        """Called by tool webhooks to update a provider's result."""
-        for group in campaign_groups.values():
+    async def update_provider_result(campaign_id: str, provider_id: str, result_data: dict) -> Optional[str]:
+        """Update the in-memory campaign state with analysis results, then persist to DB."""
+        for gid, group in campaign_groups.items():
             for camp in group["campaigns"]:
                 if camp["campaign_id"] == campaign_id:
-                    existing = next((r for r in camp["results"] if r["provider_id"] == provider_id), None)
+                    existing = next((r for r in camp["results"] if r.get("provider_id") == provider_id), None)
                     if existing:
                         existing.update(result_data)
                     else:
-                        result_data["provider_id"] = provider_id
-                        camp["results"].append(result_data)
-                    return group["group_id"]
+                        res = {"provider_id": provider_id, **result_data}
+                        camp["results"].append(res)
+
+                    # 💾 Update call in DB with results
+                    try:
+                        conv_entry = None
+                        for conv_id, ctx in conversation_map.items():
+                            if ctx.get("campaign_id") == campaign_id and ctx.get("provider_id") == provider_id:
+                                conv_entry = ctx
+                                break
+
+                        db_call_id = conv_entry.get("db_call_id") if conv_entry else None
+                        if db_call_id:
+                            update_data = {
+                                "status": result_data.get("status", "completed"),
+                                "ended_at": datetime.utcnow().isoformat(),
+                            }
+                            slot = result_data.get("offered_slot", {})
+                            if slot:
+                                update_data["offered_slot"] = json.dumps(slot) if isinstance(slot, dict) else str(slot)
+                            if result_data.get("score") is not None:
+                                update_data["score"] = result_data["score"]
+                            if result_data.get("transcript"):
+                                update_data["transcript"] = json.dumps(result_data["transcript"])
+
+                            await db.update_call(db_call_id, update_data)
+                            logger.info(f"💾 Call {db_call_id} updated in DB: {result_data.get('status')}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ DB call update failed: {e}")
+
+                    return gid
         return None

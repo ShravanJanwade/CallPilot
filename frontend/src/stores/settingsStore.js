@@ -34,7 +34,7 @@ export const useSettingsStore = create(
       saveSettings: async () => {
         const state = get()
         try {
-          const response = await fetch('http://localhost:8000/api/settings', {
+          const response = await fetch('http://localhost:8080/api/settings', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -69,7 +69,7 @@ export const useSettingsStore = create(
       // Load from backend
       loadSettings: async () => {
         try {
-          const response = await fetch('http://localhost:8000/api/settings')
+          const response = await fetch('http://localhost:8080/api/settings')
           if (!response.ok) throw new Error('Load failed')
           
           const data = await response.json()
