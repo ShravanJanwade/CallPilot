@@ -14,6 +14,8 @@ const defaultCenter = {
     lng: -71.0589 // Boston
 }
 
+const libraries = ['places']
+
 export default function LocationPicker() {
     const {
         location,
@@ -31,9 +33,9 @@ export default function LocationPicker() {
             : defaultCenter
     )
 
-    const { isLoaded } = useJsApiLoader({
+    const { isLoaded, loadError } = useJsApiLoader({
         googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '',
-        libraries: ['places']
+        libraries
     })
 
     const handleLocationInput = async (e) => {
@@ -124,7 +126,13 @@ export default function LocationPicker() {
 
                 {/* Map */}
                 <div className="rounded-xl overflow-hidden border border-gray-200">
-                    {isLoaded ? (
+                    {loadError ? (
+                        <div className="h-[300px] bg-red-50 flex flex-col items-center justify-center p-4 text-center">
+                            <p className="text-red-500 font-medium mb-2">Map failed to load</p>
+                            <p className="text-sm text-red-400">{loadError.message}</p>
+                            <p className="text-xs text-gray-500 mt-2">Check your API key configuration</p>
+                        </div>
+                    ) : isLoaded ? (
                         <GoogleMap
                             mapContainerStyle={mapContainerStyle}
                             center={mapCenter}

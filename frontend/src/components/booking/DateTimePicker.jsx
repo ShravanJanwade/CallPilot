@@ -1,5 +1,7 @@
+import { useState, useEffect } from 'react'
 import { useBookingStore } from '../../stores/bookingStore'
-import { ChevronLeft, ChevronRight, Calendar, Clock } from 'lucide-react'
+import { useAuthStore } from '../../stores/authStore'
+import { ChevronLeft, ChevronRight, Calendar, Clock, Loader2, AlertCircle } from 'lucide-react'
 
 const timePreferences = [
     { value: 'any', label: 'Any Time', icon: '🕐' },
@@ -16,6 +18,7 @@ const durationOptions = [
 ]
 
 export default function DateTimePicker() {
+    const { token } = useAuthStore()
     const {
         dateRangeStart,
         dateRangeEnd,
@@ -25,6 +28,42 @@ export default function DateTimePicker() {
         nextStep,
         prevStep
     } = useBookingStore()
+
+    const [events, setEvents] = useState([])
+    const [loading, setLoading] = useState(false)
+    const [error, setError] = useState(null)
+
+    // Fetch calendar events when dates change
+    useEffect(() => {
+        if (dateRangeStart && dateRangeEnd && token) {
+            fetchEvents()
+        }
+    }, [dateRangeStart, dateRangeEnd, token])
+
+    const fetchEvents = async () => {
+        setLoading(true)
+        setError(null)
+        try {
+            const response = await fetch(
+                `http://localhost:8000/api/calendar/events?start=${dateRangeStart}&end=${dateRangeEnd}`,
+                {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                }
+            )
+
+            if (!response.ok) throw new Error('Failed to load calendar')
+
+            const data = await response.json()
+            setEvents(data.events || [])
+        } catch (err) {
+            console.error('Calendar error:', err)
+            setError('Could not load your calendar events')
+        } finally {
+            setLoading(false)
+        }
+    }
 
     // Format date for input
     const formatDateForInput = (date) => {
@@ -129,11 +168,49 @@ export default function DateTimePicker() {
                     </div>
                 </div>
 
-                {/* Calendar Preview Placeholder */}
-                <div className="mt-6 p-4 bg-gray-50 rounded-xl">
-                    <p className="text-sm text-gray-500 text-center">
-                        📅 Your Google Calendar events will appear here to help you pick available times
-                    </p>
+                {/* Calendar Preview */}
+                <div className="mt-6">
+                    <h3 className="text-sm font-medium text-gray-700 mb-3">Your Schedule</h3>
+                    <div className={`rounded-xl border border-gray-200 overflow-hidden ${events.length > 0 ? 'bg-white' : 'bg-gray-50'
+                        }`}>
+                        {loading ? (
+                            <div className="p-8 flex justify-center">
+                                <Loader2 className="w-6 h-6 text-primary animate-spin" />
+                            </div>
+                        ) : error ? (
+                            <div className="p-6 text-center text-sm text-red-500 flex flex-col items-center gap-2">
+                                <AlertCircle className="w-5 h-5" />
+                                {error}
+                            </div>
+                        ) : events.length > 0 ? (
+                            <div className="max-h-60 overflow-y-auto divide-y divide-gray-100">
+                                {events.map(event => (
+                                    <div key={event.id} className="p-3 hover:bg-gray-50 flex items-start gap-3">
+                                        <div className="w-1.5 h-full min-h-[1.5rem] rounded-full bg-primary/50 self-stretch" />
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-sm font-medium text-gray-900 truncate">
+                                                {event.title}
+                                            </p>
+                                            <p className="text-xs text-gray-500">
+                                                {event.allDay
+                                                    ? new Date(event.start).toLocaleDateString()
+                                                    : `${new Date(event.start).toLocaleString([], {
+                                                        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+                                                    })} - ${new Date(event.end).toLocaleTimeString([], {
+                                                        hour: 'numeric', minute: '2-digit'
+                                                    })}`
+                                                }
+                                            </p>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="p-8 text-center text-gray-500 text-sm">
+                                {dateRangeStart ? 'No events found for selected dates' : 'Select dates to see your calendar'}
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
 

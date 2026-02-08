@@ -1,15 +1,19 @@
 """
 Campaign routes — start calling campaigns and manage provider search.
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 import uuid
 import logging
+import asyncio
+import random
 
 from app.config import settings
 from app.routes.auth import get_current_user
+from app.routes.ws import broadcast
+from app.routes.providers import search_providers
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -61,7 +65,11 @@ class CampaignStatus(BaseModel):
 # ---- Endpoints ----
 
 @router.post("/start", response_model=CampaignResponse)
-async def start_campaign(request: CampaignRequest, user: dict = Depends(get_current_user)):
+async def start_campaign(
+    request: CampaignRequest, 
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user)
+):
     """Start a new calling campaign to book an appointment."""
     
     campaign_id = str(uuid.uuid4())
@@ -108,8 +116,16 @@ async def start_campaign(request: CampaignRequest, user: dict = Depends(get_curr
     
     logger.info(f"🚀 Campaign started: {campaign_id} for user {user['email']}")
     
-    # TODO: Trigger async provider search and calling flow
-    # This would be handled by a background task or worker queue
+    # Trigger async swarm
+    from app.services.orchestrator import run_campaign_swarm
+    background_tasks.add_task(
+        run_campaign_swarm, 
+        campaign_id,
+        campaigns_db, 
+        request.service_type,
+        request.latitude,
+        request.longitude
+    )
     
     return CampaignResponse(
         campaign_id=campaign_id,

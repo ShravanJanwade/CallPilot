@@ -4,7 +4,8 @@ from contextlib import asynccontextmanager
 import logging
 
 from app.config import settings
-from app.routes import auth, booking, campaign, dashboard, providers, settings as settings_routes, ws, tools
+from app.config import settings
+from app.routes import auth, booking, calendar, campaign, dashboard, providers, settings as settings_routes, ws, tools, telephony
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,10 +40,12 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(booking.router, prefix="/api/booking", tags=["Booking"])
+app.include_router(calendar.router, prefix="/api/calendar", tags=["Calendar"])
 app.include_router(campaign.router, prefix="/api/campaign", tags=["Campaign"])
 app.include_router(providers.router, prefix="/api/providers", tags=["Providers"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(tools.router, prefix="/api/tools", tags=["Agent Tools"])
+app.include_router(telephony.router, prefix="/api/telephony", tags=["Telephony"])
 
 # WebSocket for live transcript streaming
 app.include_router(ws.router)

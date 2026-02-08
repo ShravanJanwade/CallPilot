@@ -20,9 +20,12 @@ const statusColors = {
     failed: '#ef4444'       // error
 }
 
+const libraries = ['places']
+
 export default function ProviderMap({ calls, userLocation }) {
     const { isLoaded } = useJsApiLoader({
-        googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
+        googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '',
+        libraries
     })
 
     // Calculate map center from calls or default
