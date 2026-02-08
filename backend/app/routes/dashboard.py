@@ -8,7 +8,7 @@ from datetime import datetime
 import logging
 
 from app.routes.auth import get_current_user
-from app.routes.campaign import campaigns_db
+from app.agents.swarm_orchestrator import campaign_groups
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -47,11 +47,15 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
     
     user_id = user["id"]
     
-    # Get user's campaigns
-    user_campaigns = [
-        c for c in campaigns_db.values() 
-        if c.get("user_id") == user_id
-    ]
+    # Get user's campaigns - Flatten from groups
+    user_campaigns = []
+    for group in campaign_groups.values():
+        if group.get("user_id") == user_id:
+            for campaign in group.get("campaigns", []):
+                # Ensure campaign has necessary fields from group if missing
+                if "started_at" not in campaign:
+                    campaign["started_at"] = group.get("created_at")
+                user_campaigns.append(campaign)
     
     # Calculate stats
     completed = [c for c in user_campaigns if c.get("status") == "complete"]

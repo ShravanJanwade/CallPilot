@@ -95,35 +95,29 @@ export const useBookingStore = create((set, get) => ({
   // Reset form
   reset: () => set(defaultBookingState),
 
-  // Get form data for API submission
+  // Get form data for API submission (matches backend CampaignRequest model)
   getFormData: () => {
     const state = get()
     return {
-      service_type: state.serviceType,
+      service_types: [state.serviceType],  // Backend expects array
       description: state.description,
-      preferred_providers: state.preferredProviders,
-      date_range_start: state.dateRangeStart,
-      date_range_end: state.dateRangeEnd,
+      date_range_start: state.dateRangeStart?.toISOString?.() || state.dateRangeStart,
+      date_range_end: state.dateRangeEnd?.toISOString?.() || state.dateRangeEnd,
       time_preference: state.timePreference,
       duration: state.duration,
       location: state.location,
       latitude: state.latitude,
       longitude: state.longitude,
-      max_distance_miles: state.maxDistance,
-      weights: {
-        availability: state.weightAvailability / 100,
-        rating: state.weightRating / 100,
-        distance: state.weightDistance / 100,
-        preference: state.weightPreference / 100
-      },
+      max_distance: state.maxDistance,
+      weight_availability: state.weightAvailability,
+      weight_rating: state.weightRating,
+      weight_distance: state.weightDistance,
+      weight_preference: state.weightPreference,
       max_providers: state.maxProviders,
-      agent_config: {
-        voice: state.agentVoice,
-        name: state.agentName,
-        first_message: state.firstMessage,
-        system_prompt: state.systemPrompt,
-        user_phone: state.userPhone
-      }
+      preferred_providers: state.preferredProviders,
+      agent_name: state.agentName,
+      first_message: state.firstMessage,
+      system_prompt: state.systemPrompt || null
     }
   }
 }))

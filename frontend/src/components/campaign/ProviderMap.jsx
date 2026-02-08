@@ -12,10 +12,14 @@ const defaultCenter = {
 }
 
 const statusColors = {
+    found: '#d1d5db',       // gray-300
+    queued: '#9ca3af',      // gray-400
+    dialing: '#f59e0b',     // warning
     ringing: '#f59e0b',     // warning
     connected: '#0ea5e9',   // primary
     negotiating: '#14b8a6', // teal
     booked: '#22c55e',      // success
+    completed: '#6b7280',   // gray-500
     no_availability: '#9ca3af', // gray
     failed: '#ef4444'       // error
 }

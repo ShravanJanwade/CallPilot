@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useBookingStore } from '../../stores/bookingStore'
 import { useCampaignStore } from '../../stores/campaignStore'
-import { useAuthStore } from '../../stores/authStore'
+import { campaignApi } from '../../services/api'
 import {
     ChevronLeft,
     Rocket,
@@ -17,7 +17,6 @@ import {
 
 export default function ReviewLaunch() {
     const navigate = useNavigate()
-    const { token } = useAuthStore()
     const { setCampaign } = useCampaignStore()
     const booking = useBookingStore()
     const [launching, setLaunching] = useState(false)
@@ -29,25 +28,12 @@ export default function ReviewLaunch() {
 
         try {
             const formData = booking.getFormData()
+            const data = await campaignApi.startCampaign(formData)
 
-            const response = await fetch('http://localhost:8000/api/campaign/start', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify(formData)
-            })
-
-            if (!response.ok) {
-                throw new Error('Failed to start campaign')
-            }
-
-            const data = await response.json()
-            setCampaign(data.campaign_id)
-            navigate(`/campaign/${data.campaign_id}`)
+            setCampaign(data.group_id)
+            navigate(`/campaign/${data.group_id}`)
         } catch (err) {
-            setError(err.message)
+            setError(err.message || 'Failed to start campaign')
             setLaunching(false)
         }
     }

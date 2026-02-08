@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useCampaignStore } from '../stores/campaignStore'
 
+const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
+
 export default function useWebSocket(campaignId) {
   const [isConnected, setIsConnected] = useState(false)
   const [error, setError] = useState(null)
@@ -13,7 +15,7 @@ export default function useWebSocket(campaignId) {
   const connect = useCallback(() => {
     if (!campaignId) return
 
-    const wsUrl = `ws://localhost:8000/ws/campaign/${campaignId}`
+    const wsUrl = `${WS_BASE_URL}/ws/transcript/${campaignId}`
     
     try {
       const ws = new WebSocket(wsUrl)

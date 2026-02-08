@@ -25,12 +25,15 @@ export default function CampaignLive() {
     // Connect WebSocket
     const { isConnected } = useWebSocket(id)
 
-    // Cleanup on unmount
+    // Cleanup on unmount & fetch initial state
     useEffect(() => {
+        if (id) {
+            useCampaignStore.getState().fetchCampaign(id)
+        }
         return () => {
             // Don't reset if navigating to confirmation
         }
-    }, [])
+    }, [id])
 
     const handleCancel = async () => {
         await cancelCampaign()

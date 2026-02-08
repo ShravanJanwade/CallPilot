@@ -5,7 +5,7 @@ Telephony routes — Handle webhooks from Twilio/ElevenLabs.
 from fastapi import APIRouter, Request, HTTPException
 import logging
 from app.routes.ws import broadcast
-from app.routes.campaign import campaigns_db
+from app.agents.swarm_orchestrator import campaign_groups
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -15,12 +15,13 @@ logger = logging.getLogger(__name__)
 # This is O(N) but fine for a prototype.
 
 def find_campaign_and_call_by_call_id(call_id: str):
-    for c_id, campaign in campaigns_db.items():
-        if "calls" in campaign:
-            for call in campaign["calls"]:
-                # We need to store the 'call_id' or 'external_id' on the call record when we start it
-                if call.get("external_id") == call_id:
-                    return c_id, campaign, call
+    for group in campaign_groups.values():
+        for campaign in group.get("campaigns", []):
+            if "results" in campaign:
+                for result in campaign["results"]:
+                    # We store 'conversation_id' in results
+                    if result.get("conversation_id") == call_id:
+                        return campaign["campaign_id"], campaign, result
     return None, None, None
 
 @router.post("/webhook/elevenlabs/status")

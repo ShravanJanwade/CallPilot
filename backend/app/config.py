@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str = ""
     elevenlabs_agent_id: str = ""  # Conversational AI agent ID
     elevenlabs_phone_number_id: str = ""  # Twilio phone number imported to ElevenLabs
+    elevenlabs_webhook_secret: str = ""  # Webhook signing secret for verification
 
     # -- Twilio --
     twilio_account_sid: str = ""
@@ -40,6 +41,15 @@ class Settings(BaseSettings):
     weight_rating: float = 0.3
     weight_distance: float = 0.2
     weight_preference: float = 0.1
+
+    # -- Spam Prevention --
+    spam_prevent: bool = True  # When True, calls go to safe test numbers instead of real businesses
+    safe_test_numbers: str = ""  # Comma-separated list of phone numbers for testing
+
+    @property
+    def safe_numbers_list(self) -> list[str]:
+        """Parse safe test numbers into a list."""
+        return [n.strip() for n in self.safe_test_numbers.split(",") if n.strip()]
 
     class Config:
         env_file = ".env"

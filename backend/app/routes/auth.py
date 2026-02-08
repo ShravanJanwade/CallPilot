@@ -77,6 +77,27 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     return user
 
 
+async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """
+    Dependency that returns user if authenticated, or a test user if not.
+    This allows the calling feature to work during development without OAuth.
+    """
+    if credentials:
+        user_id = verify_token(credentials.credentials)
+        if user_id:
+            user = users_db.get(user_id)
+            if user:
+                return user
+    
+    # Return a test user for development
+    logger.info("⚠️ Using test user (no auth) - for development only")
+    return {
+        "id": "test-user-123",
+        "email": "test@callpilot.dev",
+        "name": "Test User"
+    }
+
+
 # ---- Endpoints ----
 
 @router.post("/google", response_model=AuthResponse)

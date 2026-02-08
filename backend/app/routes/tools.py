@@ -1,15 +1,18 @@
 """
 Tool webhook endpoints — ElevenLabs agent calls these mid-conversation.
-Now with raw request logging (to debug ElevenLabs format) and Google Calendar integration.
+Now with campaign tracking, WebSocket broadcasting, and Google Calendar integration.
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import json
+import asyncio
 
 from app.tools.calendar_tool import CalendarService
+from app.routes.ws import broadcast
+from app.agents.swarm_orchestrator import CampaignManager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -28,31 +31,12 @@ def get_calendar() -> CalendarService:
     return _calendar_service
 
 
-# ---- Request Models ----
-class CheckCalendarRequest(BaseModel):
-    proposed_date: str
-    proposed_time: str
-    duration_minutes: Optional[int] = 60
-
-
-class ConfirmBookingRequest(BaseModel):
-    provider_name: str
-    appointment_date: str
-    appointment_time: str
-    service_type: str
-    notes: Optional[str] = ""
-
-
-class NoAvailabilityRequest(BaseModel):
-    provider_name: str
-    reason: str
-
-
 # ---- Helper: Parse any request format ----
 async def parse_request_body(request: Request) -> dict:
     """
     ElevenLabs may send data in unexpected formats.
     This helper logs the raw body and tries to parse it flexibly.
+    Also extracts campaign_id and provider_id from dynamic variables.
     """
     raw_body = await request.body()
     raw_text = raw_body.decode("utf-8", errors="replace")
@@ -68,9 +52,17 @@ async def parse_request_body(request: Request) -> dict:
     # ElevenLabs sometimes nests params under a key
     # Try to flatten common patterns
     if "properties" in data and isinstance(data["properties"], dict):
-        data = data["properties"]
+        data = {**data, **data["properties"]}
     if "parameters" in data and isinstance(data["parameters"], dict):
-        data = data["parameters"]
+        data = {**data, **data["parameters"]}
+    
+    # Look for dynamic_variables that might contain campaign_id/provider_id
+    if "dynamic_variables" in data and isinstance(data["dynamic_variables"], dict):
+        dv = data["dynamic_variables"]
+        if "campaign_id" not in data and "campaign_id" in dv:
+            data["campaign_id"] = dv["campaign_id"]
+        if "provider_id" not in data and "provider_id" in dv:
+            data["provider_id"] = dv["provider_id"]
 
     logger.info(f"🔍 PARSED DATA: {data}")
     return data
@@ -86,6 +78,8 @@ async def check_calendar(request: Request):
     proposed_date = data.get("proposed_date", "")
     proposed_time = data.get("proposed_time", "")
     duration_minutes = data.get("duration_minutes", 60)
+    campaign_id = data.get("campaign_id", "")
+    provider_id = data.get("provider_id", "")
 
     if not proposed_date or not proposed_time:
         logger.warning(f"⚠️ Missing date/time in request: {data}")
@@ -94,36 +88,72 @@ async def check_calendar(request: Request):
             "message": "Could not parse date/time, assuming available. Please confirm the slot."
         }
 
-    logger.info(f"📅 Calendar check: {proposed_date} at {proposed_time} ({duration_minutes}min)")
+    logger.info(f"📅 Calendar check: {proposed_date} at {proposed_time} ({duration_minutes}min) - Campaign: {campaign_id}, Provider: {provider_id}")
+
+    # Broadcast tool called event
+    if campaign_id:
+        await broadcast(campaign_id, {
+            "type": "tool_called",
+            "campaign_id": campaign_id,
+            "provider_id": provider_id,
+            "tool": "check_calendar",
+            "params": {"date": proposed_date, "time": proposed_time}
+        })
 
     # Try real Google Calendar check
     try:
         calendar = get_calendar()
         is_available = calendar.check_availability(proposed_date, proposed_time, duration_minutes)
 
-        if not is_available:
-            return {
-                "available": False,
-                "message": f"The user has a conflict on {proposed_date} at {proposed_time}. Please ask for an alternative time."
-            }
-        else:
-            return {
-                "available": True,
-                "message": f"The user is free on {proposed_date} at {proposed_time}. You may proceed to confirm this slot."
-            }
+        result = {
+            "available": is_available,
+            "message": (
+                f"The user is free on {proposed_date} at {proposed_time}. You may proceed to confirm this slot."
+                if is_available else
+                f"The user has a conflict on {proposed_date} at {proposed_time}. Please ask for an alternative time."
+            )
+        }
     except Exception as e:
         logger.warning(f"⚠️ Google Calendar error (falling back to mock): {e}")
         # Fallback: mock logic — busy at 2 PM
         is_busy = proposed_time.startswith("14:")
-        if is_busy:
-            return {
-                "available": False,
-                "message": f"The user has a conflict on {proposed_date} at {proposed_time}. Please ask for an alternative time."
-            }
-        return {
-            "available": True,
-            "message": f"The user is free on {proposed_date} at {proposed_time}. You may proceed to confirm this slot."
+        is_available = not is_busy
+        result = {
+            "available": is_available,
+            "message": (
+                f"The user is free on {proposed_date} at {proposed_time}. You may proceed to confirm this slot."
+                if is_available else
+                f"The user has a conflict on {proposed_date} at {proposed_time}. Please ask for an alternative time."
+            )
         }
+
+    # Broadcast result
+    if campaign_id:
+        await broadcast(campaign_id, {
+            "type": "tool_result",
+            "campaign_id": campaign_id,
+            "provider_id": provider_id,
+            "tool": "check_calendar",
+            "result": result
+        })
+        
+        # If slot is available, broadcast slot_offered event
+        if is_available:
+            await broadcast(campaign_id, {
+                "type": "slot_offered",
+                "campaign_id": campaign_id,
+                "provider_id": provider_id,
+                "date": proposed_date,
+                "time": proposed_time
+            })
+            
+            # Update campaign manager
+            CampaignManager.update_provider_result(campaign_id, provider_id, {
+                "status": "negotiating",
+                "offered_slot": {"date": proposed_date, "time": proposed_time}
+            })
+
+    return result
 
 
 @router.post("/confirm-booking")
@@ -136,12 +166,26 @@ async def confirm_booking(request: Request):
     appointment_time = data.get("appointment_time", "")
     service_type = data.get("service_type", "Appointment")
     notes = data.get("notes", "")
+    campaign_id = data.get("campaign_id", "")
+    provider_id = data.get("provider_id", "")
 
-    logger.info(f"✅ Booking confirmed: {provider_name} on {appointment_date} at {appointment_time}")
+    logger.info(f"✅ Booking confirmed: {provider_name} on {appointment_date} at {appointment_time} - Campaign: {campaign_id}")
+
+    # Broadcast tool called event
+    if campaign_id:
+        await broadcast(campaign_id, {
+            "type": "tool_called",
+            "campaign_id": campaign_id,
+            "provider_id": provider_id,
+            "tool": "confirm_booking",
+            "params": {"provider": provider_name, "date": appointment_date, "time": appointment_time}
+        })
 
     booking = {
         "id": len(confirmed_bookings) + 1,
         "provider_name": provider_name,
+        "provider_id": provider_id,
+        "campaign_id": campaign_id,
         "date": appointment_date,
         "time": appointment_time,
         "service": service_type,
@@ -167,6 +211,30 @@ async def confirm_booking(request: Request):
 
     confirmed_bookings.append(booking)
 
+    # Update campaign manager and broadcast
+    if campaign_id:
+        CampaignManager.update_provider_result(campaign_id, provider_id, {
+            "status": "booked",
+            "provider_name": provider_name,
+            "offered_slot": {"date": appointment_date, "time": appointment_time},
+            "service_type": service_type,
+            "notes": notes,
+        })
+        
+        await broadcast(campaign_id, {
+            "type": "booking_confirmed",
+            "campaign_id": campaign_id,
+            "provider_id": provider_id,
+            "booking": {
+                "id": booking["id"],
+                "provider_name": provider_name,
+                "date": appointment_date,
+                "time": appointment_time,
+                "service": service_type,
+                "calendar_event_created": booking["calendar_event_id"] is not None
+            }
+        })
+
     return {
         "success": True,
         "message": f"Appointment confirmed with {provider_name} on {appointment_date} at {appointment_time} for {service_type}.",
@@ -182,8 +250,44 @@ async def no_availability(request: Request):
 
     provider_name = data.get("provider_name", "Unknown Provider")
     reason = data.get("reason", "No reason given")
+    campaign_id = data.get("campaign_id", "")
+    provider_id = data.get("provider_id", "")
 
-    logger.info(f"❌ No availability: {provider_name} — {reason}")
+    logger.info(f"❌ No availability: {provider_name} — {reason} - Campaign: {campaign_id}")
+
+    # Broadcast tool called event
+    if campaign_id:
+        await broadcast(campaign_id, {
+            "type": "tool_called",
+            "campaign_id": campaign_id,
+            "provider_id": provider_id,
+            "tool": "no_availability",
+            "params": {"provider": provider_name, "reason": reason}
+        })
+
+    # Update campaign manager
+    if campaign_id:
+        CampaignManager.update_provider_result(campaign_id, provider_id, {
+            "status": "no_availability",
+            "provider_name": provider_name,
+            "reason": reason,
+        })
+        
+        await broadcast(campaign_id, {
+            "type": "no_availability",
+            "campaign_id": campaign_id,
+            "provider_id": provider_id,
+            "provider_name": provider_name,
+            "reason": reason
+        })
+        
+        await broadcast(campaign_id, {
+            "type": "call_ended",
+            "campaign_id": campaign_id,
+            "provider_id": provider_id,
+            "status": "no_availability",
+            "reason": reason
+        })
 
     return {
         "success": True,

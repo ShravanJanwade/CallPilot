@@ -5,7 +5,7 @@ import logging
 
 from app.config import settings
 from app.config import settings
-from app.routes import auth, booking, calendar, campaign, dashboard, providers, settings as settings_routes, ws, tools, telephony
+from app.routes import auth, booking, calendar, campaign, dashboard, providers, settings as settings_routes, ws, tools, telephony, webhooks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ app.include_router(providers.router, prefix="/api/providers", tags=["Providers"]
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(tools.router, prefix="/api/tools", tags=["Agent Tools"])
 app.include_router(telephony.router, prefix="/api/telephony", tags=["Telephony"])
+app.include_router(webhooks.router, prefix="/api/webhooks", tags=["Webhooks"])
 
 # WebSocket for live transcript streaming
 app.include_router(ws.router)

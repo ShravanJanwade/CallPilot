@@ -21,9 +21,16 @@ export default function CampaignProgress() {
             <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-4">
                     <div className="flex items-center gap-2 text-sm">
-                        <Phone className="w-4 h-4 text-primary" />
+                        <Phone className={`w-4 h-4 ${activeCalls > 0 ? 'text-primary' : 'text-gray-400'}`} />
                         <span className="font-medium text-gray-700">
-                            {activeCalls > 0 ? `${activeCalls} active` : 'No active calls'}
+                            {status === 'calling' && activeCalls === 0 ? (
+                                <span className="flex items-center gap-2 text-warning">
+                                    <span className="loading loading-spinner loading-xs"></span>
+                                    Dialing...
+                                </span>
+                            ) : (
+                                activeCalls > 0 ? `${activeCalls} active` : 'No active calls'
+                            )}
                         </span>
                     </div>
                     <div className="flex items-center gap-2 text-sm">

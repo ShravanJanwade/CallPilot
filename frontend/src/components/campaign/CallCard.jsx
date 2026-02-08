@@ -1,12 +1,16 @@
-import { Phone, CheckCircle, XCircle, Clock, Loader2, ChevronDown, ChevronUp } from 'lucide-react'
+import { Phone, CheckCircle, XCircle, Clock, Loader2, ChevronDown, ChevronUp, Search, PhoneCall, Calendar } from 'lucide-react'
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 const statusConfig = {
+    found: { color: 'text-gray-400', bg: 'bg-gray-100', icon: Search, label: 'Found' },
+    queued: { color: 'text-gray-400', bg: 'bg-gray-100', icon: Clock, label: 'Queued' },
+    dialing: { color: 'text-warning', bg: 'bg-warning/10', icon: PhoneCall, label: 'Dialing...' },
     ringing: { color: 'text-warning', bg: 'bg-warning/10', icon: Phone, label: 'Ringing' },
     connected: { color: 'text-primary', bg: 'bg-primary/10', icon: Loader2, label: 'Connected' },
     negotiating: { color: 'text-teal', bg: 'bg-teal/10', icon: Loader2, label: 'Negotiating' },
-    booked: { color: 'text-success', bg: 'bg-success/10', icon: CheckCircle, label: 'Slot Available' },
+    booked: { color: 'text-success', bg: 'bg-success/10', icon: CheckCircle, label: 'Booked!' },
+    completed: { color: 'text-gray-500', bg: 'bg-gray-100', icon: Calendar, label: 'Completed' },
     no_availability: { color: 'text-gray-400', bg: 'bg-gray-100', icon: XCircle, label: 'No Availability' },
     failed: { color: 'text-error', bg: 'bg-error/10', icon: XCircle, label: 'Failed' }
 }
@@ -21,7 +25,7 @@ export default function CallCard({ call }) {
         return `${mins}:${secs.toString().padStart(2, '0')}`
     }
 
-    const isActive = ['ringing', 'connected', 'negotiating'].includes(call.status)
+    const isActive = ['dialing', 'ringing', 'connected', 'negotiating'].includes(call.status)
 
     return (
         <motion.div
@@ -84,8 +88,8 @@ export default function CallCard({ call }) {
                                 >
                                     <div
                                         className={`max-w-[80%] px-3 py-2 rounded-lg text-sm ${msg.speaker === 'agent'
-                                                ? 'bg-primary text-white'
-                                                : 'bg-white border border-gray-200 text-gray-800'
+                                            ? 'bg-primary text-white'
+                                            : 'bg-white border border-gray-200 text-gray-800'
                                             }`}
                                     >
                                         <p className="text-xs opacity-75 mb-1">
