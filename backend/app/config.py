@@ -3,22 +3,19 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    """All environment variables in one place."""
-
     # -- App --
     app_name: str = "CallPilot"
     debug: bool = True
 
     # -- ElevenLabs --
     elevenlabs_api_key: str = ""
-    elevenlabs_agent_id: str = ""  # Conversational AI agent ID
-    elevenlabs_phone_number_id: str = ""  # Twilio phone number imported to ElevenLabs
-    elevenlabs_webhook_secret: str = ""  # Webhook signing secret for verification
+    elevenlabs_agent_id: str = ""
+    elevenlabs_phone_number_id: str = ""  # Internal ElevenLabs ID for your Twilio number
 
     # -- Twilio --
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
-    twilio_phone_number: str = ""  # Your Twilio outbound number
+    twilio_phone_number: str = ""
 
     # -- Google APIs --
     google_calendar_credentials_path: str = "credentials/google_creds.json"
@@ -27,33 +24,40 @@ class Settings(BaseSettings):
     google_oauth_client_secret: str = ""
     google_oauth_redirect_uri: str = "http://localhost:5173/auth/callback"
 
-    # -- JWT --
-    jwt_secret: str = "your-secret-key-change-in-production"
+    # -- Auth --
+    jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expiration_hours: int = 24
 
     # -- Concurrency --
-    max_parallel_calls: int = 15  # Swarm mode cap
-    call_timeout_seconds: int = 120  # Max duration per call
+    max_parallel_calls: int = 15
+    call_timeout_seconds: int = 120
 
-    # -- Scoring Weights (user-adjustable defaults) --
+    # -- Scoring Weights --
     weight_availability: float = 0.4
     weight_rating: float = 0.3
     weight_distance: float = 0.2
     weight_preference: float = 0.1
 
+    supabase_url: str = ""
+    supabase_anon_key: str = ""
+    supabase_service_role_key: str = ""
+
     # -- Spam Prevention --
-    spam_prevent: bool = True  # When True, calls go to safe test numbers instead of real businesses
-    safe_test_numbers: str = ""  # Comma-separated list of phone numbers for testing
+    spam_prevent: bool = True
+    safe_test_numbers: str = ""  # Comma-separated
+
+    # -- Webhooks --
+    elevenlabs_webhook_secret: str = ""
 
     @property
     def safe_numbers_list(self) -> list[str]:
-        """Parse safe test numbers into a list."""
         return [n.strip() for n in self.safe_test_numbers.split(",") if n.strip()]
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 

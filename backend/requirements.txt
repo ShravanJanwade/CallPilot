@@ -1,6 +1,4 @@
-# ============================================
-# requirements.txt
-# ============================================
+# Core
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 pydantic==2.9.0
@@ -20,6 +18,11 @@ google-api-python-client>=2.149.0
 google-auth-oauthlib>=1.2.1
 googlemaps>=4.10.0
 
-# Async & Concurrency
+# Async
 aiofiles>=24.1.0
 
+# Database
+supabase>=2.0.0
+
+# Auth
+PyJWT>=2.8.0

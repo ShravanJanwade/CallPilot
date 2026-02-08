@@ -1,98 +1,94 @@
-"""
-Webhooks route — Handle post-call webhooks from ElevenLabs.
-"""
-from fastapi import APIRouter, Request, HTTPException
+"""Post-call webhook — ElevenLabs sends transcript after each call ends."""
+from fastapi import APIRouter, Request
 import logging
-from app.routes.ws import broadcast
-from app.agents.swarm_orchestrator import campaign_groups
+import json
+import asyncio
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-def find_campaign_by_id(campaign_id: str):
-    for group in campaign_groups.values():
-        for campaign in group.get("campaigns", []):
-            if campaign["campaign_id"] == campaign_id:
-                return campaign
-    return None
 
 @router.post("/post-call")
-async def handle_post_call_webhook(request: Request):
+async def handle_post_call(request: Request):
     """
-    Handle post-call webhook from ElevenLabs (analysis, transcript, etc.).
+    ElevenLabs posts here after every call ends.
+    Contains conversation_id, transcript, analysis, metadata.
     """
     try:
-        data = await request.json()
-        logger.info(f"📞 ElevenLabs Post-Call Webhook received")
-        
-        conversation_id = data.get("conversation_id")
-        if not conversation_id:
-            logger.warning("Webhook missing conversation_id")
-            return {"status": "ignored", "reason": "missing_conversation_id"}
+        raw = await request.body()
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+        logger.info(f"📞 Post-call webhook received")
 
-        # Find campaign and provider info
-        # Try to find by iterating campaigns (fallback)
-        mapping = None
-        campaign = None
-        
-        for group in campaign_groups.values():
-            for camp in group.get("campaigns", []):
-                for res in camp.get("results", []):
-                    if res.get("conversation_id") == conversation_id:
-                        mapping = {
-                            "campaign_id": camp["campaign_id"], 
-                            "provider_id": res.get("provider_id")
-                        }
-                        campaign = camp
-                        break
-                if mapping: break
-            if mapping: break
-        
-        if not mapping or not campaign:
-            return {"status": "ignored", "reason": "unknown_conversation_or_campaign"}
+        conv_id = data.get("conversation_id", "")
+        transcript = data.get("transcript", [])
+        analysis = data.get("analysis", {})
+        metadata = data.get("metadata", {})
 
-        campaign_id = mapping["campaign_id"]
-        provider_id = mapping["provider_id"]
+        logger.info(f"📞 Conversation: {conv_id}, transcript entries: {len(transcript) if isinstance(transcript, list) else 'N/A'}")
 
-        # Update the specific call record
-        call_record = next((r for r in campaign["results"] if r["provider_id"] == provider_id), None)
-        
-        if call_record:
-            # Store full transcript if available
-            if "transcript" in data:
-                # Convert ElevenLabs transcript format to ours if needed
-                # For now, just store it raw or processed
-                call_record["full_transcript"] = data["transcript"]
-            
-            # Store audio URL
-            if "recording_url" in data:
-                call_record["audioUrl"] = data["recording_url"]
-                
-            # Update status if analysis indicates success/failure
-            if "analysis" in data:
-                analysis = data["analysis"]
-                call_record["analysis"] = analysis
-                
-                # Check for successful booking in analysis
-                if analysis.get("success"):
-                     call_record["status"] = "booked"
-                elif analysis.get("failure_reason") == "no_availability":
-                     call_record["status"] = "no_availability"
-                else:
-                     # Only mark complete if not already in terminal state
-                     if call_record["status"] not in ["booked", "no_availability", "failed"]:
-                        call_record["status"] = "completed"
+        # Look up which campaign this belongs to
+        from app.agents.swarm_orchestrator import conversation_map, CampaignManager
+        from app.routes.ws import broadcast
 
-            # Broadcast update
-            await broadcast(campaign_id, {
-                "type": "campaign_update",
-                "campaign": campaign
+        mapping = conversation_map.get(conv_id)
+        if mapping:
+            group_id = mapping["group_id"]
+            campaign_id = mapping["campaign_id"]
+            provider_id = mapping["provider_id"]
+
+            # Format transcript for frontend
+            formatted = []
+            if isinstance(transcript, list):
+                for entry in transcript:
+                    formatted.append({
+                        "role": entry.get("role", "unknown"),
+                        "message": entry.get("message", ""),
+                        "time": entry.get("time_in_call_secs", 0),
+                    })
+            elif isinstance(transcript, str):
+                formatted = [{"role": "system", "message": transcript, "time": 0}]
+
+            # Now awaited since update_provider_result is async
+            await CampaignManager.update_provider_result(campaign_id, provider_id, {
+                "transcript": formatted,
+                "analysis": analysis,
             })
-            
-            logger.info(f"✅ Call record updated from webhook for {provider_id}")
 
-        return {"status": "processed"}
+            # --- DB PERSISTENCE: Save transcript to call record ---
+            try:
+                from app import database as db
+                db_call_id = mapping.get("db_call_id")
+                if db_call_id:
+                    update_data = {
+                        "transcript": json.dumps(formatted),
+                        "ended_at": json.dumps(metadata.get("ended_at")) if metadata.get("ended_at") else None,
+                    }
+                    # Calculate duration if we have timing info
+                    if formatted:
+                        last_time = max((f.get("time", 0) for f in formatted), default=0)
+                        if last_time > 0:
+                            update_data["duration_seconds"] = int(last_time)
+
+                    await db.update_call(db_call_id, update_data)
+                    logger.info(f"💾 Transcript saved to DB for call {db_call_id}")
+                else:
+                    logger.info(f"📝 No db_call_id for conversation {conv_id}, transcript in memory only")
+            except Exception as e:
+                logger.warning(f"⚠️ DB transcript save failed: {e}")
+
+            asyncio.create_task(broadcast(group_id, {
+                "type": "transcript_loaded",
+                "campaign_id": campaign_id,
+                "provider_id": provider_id,
+                "transcript": formatted,
+            }))
+
+            logger.info(f"✅ Transcript stored for {provider_id} in campaign {campaign_id}")
+        else:
+            logger.warning(f"⚠️ No campaign mapping for conversation {conv_id}")
 
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        raise HTTPException(status_code=500, detail="Webhook processing error")
+        logger.error(f"❌ Post-call webhook error: {e}", exc_info=True)
+
+    # Always return 200 to prevent ElevenLabs from retrying
+    return {"status": "ok"}

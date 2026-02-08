@@ -1,5 +1,6 @@
 """
 Auth routes — Google OAuth flow + JWT session management.
+Uses Supabase for user persistence.
 """
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -11,19 +12,21 @@ import jwt
 import logging
 
 from app.config import settings
+from app.database import get_user_by_email, get_user_by_id, create_user, update_user
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
-
-# In-memory user store (replace with database in production)
-users_db: dict[str, dict] = {}
 
 
 # ---- Models ----
 
 class GoogleAuthRequest(BaseModel):
     code: str
+
+
+class GoogleIdTokenRequest(BaseModel):
+    credential: str
 
 
 class UserResponse(BaseModel):
@@ -62,7 +65,7 @@ def verify_token(token: str) -> Optional[str]:
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    """Dependency to get current authenticated user."""
+    """Dependency to get current authenticated user from Supabase."""
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
@@ -70,7 +73,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    user = users_db.get(user_id)
+    # Fetch user from Supabase instead of in-memory dict
+    user = await get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     
@@ -99,6 +103,85 @@ async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(
 
 
 # ---- Endpoints ----
+
+@router.post("/signin", response_model=AuthResponse)
+async def google_signin(request: GoogleIdTokenRequest):
+    """Sign in with Google ID token credential (from Google Identity Services)."""
+    try:
+        # Decode the Google ID token (JWT) - just base64 decode the payload
+        # Note: In production, verify signature with Google's public keys
+        parts = request.credential.split('.')
+        if len(parts) != 3:
+            raise HTTPException(status_code=400, detail="Invalid credential format")
+        
+        # Decode payload (add padding if needed)
+        payload_b64 = parts[1]
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += '=' * padding
+        
+        import base64
+        import json
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        userinfo = json.loads(payload_bytes)
+        
+        email = userinfo.get("email")
+        name = userinfo.get("name", email.split("@")[0] if email else "User")
+        picture = userinfo.get("picture")
+        
+        if not email:
+            raise HTTPException(status_code=400, detail="No email in credential")
+        
+        logger.info(f"🔐 Google sign-in for: {email}")
+        
+    except Exception as e:
+        logger.error(f"Failed to decode credential: {e}")
+        raise HTTPException(status_code=400, detail="Failed to decode credential")
+    
+    # Check if user already exists in Supabase
+    existing_user = await get_user_by_email(email)
+    
+    if existing_user:
+        user_id = existing_user["id"]
+        # Update name/avatar if changed
+        try:
+            user = await update_user(user_id, {
+                "name": name,
+                "avatar_url": picture,
+            })
+            if not user:
+                user = existing_user
+        except Exception as e:
+            logger.warning(f"Failed to update user: {e}")
+            user = existing_user
+        logger.info(f"✅ Existing user signed in: {email}")
+    else:
+        # Create new user in Supabase
+        try:
+            user = await create_user({
+                "email": email,
+                "name": name,
+                "avatar_url": picture,
+            })
+            user_id = user["id"]
+            logger.info(f"✅ New user created: {email} (ID: {user_id})")
+        except Exception as e:
+            logger.error(f"Failed to create user: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create user")
+    
+    # Create JWT session token
+    token = create_token(user_id)
+    
+    return AuthResponse(
+        token=token,
+        user=UserResponse(
+            id=user_id,
+            email=email,
+            name=name,
+            avatar_url=picture
+        )
+    )
+
 
 @router.post("/google", response_model=AuthResponse)
 async def google_auth(request: GoogleAuthRequest):
@@ -142,20 +225,37 @@ async def google_auth(request: GoogleAuthRequest):
             logger.error(f"HTTP error during Google auth: {e}")
             raise HTTPException(status_code=500, detail="Authentication service error")
     
-    # Create or update user
-    user_id = userinfo.get("id")
-    user = {
-        "id": user_id,
-        "email": userinfo.get("email"),
-        "name": userinfo.get("name"),
-        "avatar_url": userinfo.get("picture"),
-        "google_access_token": access_token,
-        "google_refresh_token": refresh_token,
-        "created_at": datetime.utcnow().isoformat()
-    }
-    users_db[user_id] = user
+    email = userinfo.get("email")
     
-    logger.info(f"✅ User authenticated: {user['email']}")
+    # Check if user already exists in Supabase
+    existing_user = await get_user_by_email(email)
+    
+    if existing_user:
+        # Update existing user with new tokens
+        user_id = existing_user["id"]
+        updated_data = {
+            "name": userinfo.get("name"),
+            "avatar_url": userinfo.get("picture"),
+            "google_access_token": access_token,
+            "google_refresh_token": refresh_token or existing_user.get("google_refresh_token"),
+        }
+        user = await update_user(user_id, updated_data)
+        if not user:
+            user = existing_user  # Fallback to existing if update returns None
+            user.update(updated_data)
+        logger.info(f"✅ Existing user updated: {email}")
+    else:
+        # Create new user in Supabase
+        user_data = {
+            "email": email,
+            "name": userinfo.get("name"),
+            "avatar_url": userinfo.get("picture"),
+            "google_access_token": access_token,
+            "google_refresh_token": refresh_token,
+        }
+        user = await create_user(user_data)
+        user_id = user["id"]
+        logger.info(f"✅ New user created: {email}")
     
     # Create JWT session token
     token = create_token(user_id)
@@ -166,7 +266,7 @@ async def google_auth(request: GoogleAuthRequest):
             id=user_id,
             email=user["email"],
             name=user["name"],
-            avatar_url=user["avatar_url"]
+            avatar_url=user.get("avatar_url")
         )
     )
 

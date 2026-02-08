@@ -1,9 +1,11 @@
 """
-Swarm Orchestrator — manages parallel outbound calling campaigns.
-Searches providers, triggers calls, tracks results, pushes WebSocket updates.
+Swarm Orchestrator — the brain of CallPilot.
+Searches providers → launches parallel calls → tracks results → ranks → pushes live updates.
+Includes cross-call intelligence: later calls know about earlier offers.
 """
 import asyncio
 import uuid
+import json
 import logging
 from datetime import datetime
 from typing import Optional
@@ -11,30 +13,37 @@ from typing import Optional
 from app.tools.places_tool import PlacesService
 from app.tools.distance_tool import DistanceService
 from app.telephony.call_manager import trigger_outbound_call, get_call_number, get_conversation_details
-# from app.scoring.ranker import compute_score # ranker module not requested, assuming it exists or skipping for now if not critical
-from app.routes.ws import broadcast
+from app.scoring.ranker import rank_results
+from app import database as db
 
 logger = logging.getLogger(__name__)
 
-# In-memory campaign store (replace with DB for production)
+# In-memory stores
 campaign_groups: dict = {}
-# Maps conversation_id → (group_id, campaign_id, provider_id)
-conversation_map: dict = {}
+conversation_map: dict = {}  # conversation_id → {group_id, campaign_id, provider_id}
 
-places_service = PlacesService()
-distance_service = DistanceService()
+places = PlacesService()
+distances = DistanceService()
+
+
+async def _broadcast(room_id: str, message: dict):
+    """Safe broadcast — import here to avoid circular imports."""
+    try:
+        from app.routes.ws import broadcast
+        await broadcast(room_id, message)
+    except Exception as e:
+        logger.warning(f"⚠️ Broadcast failed: {e}")
 
 
 class CampaignManager:
-    
+
     @staticmethod
     async def start_campaign_group(request: dict, user_id: str = "default") -> dict:
-        """
-        Start a campaign group. One group can contain multiple service types.
-        Each service type gets its own campaign with parallel calls.
-        """
         group_id = f"grp_{uuid.uuid4().hex[:12]}"
-        
+        service_types = request.get("service_types", [])
+        if isinstance(service_types, str):
+            service_types = [service_types]
+
         group = {
             "group_id": group_id,
             "user_id": user_id,
@@ -42,354 +51,410 @@ class CampaignManager:
             "campaigns": [],
             "created_at": datetime.utcnow().isoformat(),
         }
-        
-        service_types = request.get("service_types", [])
-        if isinstance(service_types, str):
-            service_types = [service_types]
-        
-        location = request.get("location", "Boston, MA")
-        max_distance = request.get("max_distance_miles", 10)
-        max_providers = request.get("max_providers_per_type", 3)
-        preferred_date = request.get("preferred_date", "this week")
-        preferences = request.get("preferences", {})
-        preferred_providers = request.get("preferred_providers", [])
-        
-        for svc_type in service_types:
-            campaign_id = f"camp_{uuid.uuid4().hex[:12]}"
+
+        for svc in service_types:
+            cid = f"camp_{uuid.uuid4().hex[:12]}"
             campaign = {
-                "campaign_id": campaign_id,
+                "campaign_id": cid,
                 "group_id": group_id,
-                "service_type": svc_type,
-                "location": location,
-                "max_distance": max_distance,
-                "max_providers": max_providers,
-                "preferred_date": preferred_date,
-                "preferences": preferences,
-                "preferred_providers": preferred_providers,
+                "service_type": svc,
+                "location": request.get("location", "Boston, MA"),
+                "max_distance": request.get("max_distance_miles", 10),
+                "max_providers": request.get("max_providers_per_type", 3),
+                "preferred_date": request.get("preferred_date", "this week"),
+                "preferences": request.get("preferences", {
+                    "availability": 0.4, "rating": 0.3, "distance": 0.2, "preference": 0.1
+                }),
+                "preferred_providers": request.get("preferred_providers", []),
                 "status": "searching",
                 "providers": [],
                 "results": [],
                 "best_match": None,
+                "origin_lat": 0, "origin_lng": 0,
             }
             group["campaigns"].append(campaign)
-        
+
         campaign_groups[group_id] = group
-        
-        # Launch campaigns in parallel (non-blocking)
+
+        # Launch all campaigns as background tasks
         for campaign in group["campaigns"]:
-            asyncio.create_task(
-                CampaignManager._run_campaign(group_id, campaign)
-            )
-        
+            asyncio.create_task(CampaignManager._run_campaign(group_id, campaign))
+
+        # --- DB PERSISTENCE: Save campaigns to database ---
+        for campaign in group["campaigns"]:
+            try:
+                if user_id and user_id != "default" and len(user_id) >= 32:
+                    db_campaign = await db.create_campaign({
+                        "user_id": user_id,
+                        "service_type": campaign["service_type"],
+                        "location_address": campaign["location"],
+                        "latitude": campaign.get("origin_lat", 0),
+                        "longitude": campaign.get("origin_lng", 0),
+                        "max_distance": campaign["max_distance"],
+                        "max_providers": campaign["max_providers"],
+                        "weights": json.dumps(campaign.get("preferences", {})),
+                        "agent_config": json.dumps({
+                            "name": "Alex",
+                            "first_message": "",
+                            "system_prompt": None
+                        }),
+                        "status": "running",
+                        "date_range_start": datetime.utcnow().date().isoformat(),
+                        "date_range_end": datetime.utcnow().date().isoformat(),
+                    })
+                    campaign["db_id"] = db_campaign.get("id")
+                    logger.info(f"💾 Campaign {campaign['campaign_id']} saved to DB: {campaign['db_id']}")
+                else:
+                    logger.info(f"📝 Campaign {campaign['campaign_id']} running in memory (no auth)")
+            except Exception as e:
+                logger.warning(f"⚠️ DB save skipped for campaign: {e}")
+
         return group
-    
+
     @staticmethod
     async def _run_campaign(group_id: str, campaign: dict):
-        """Run a single campaign: search → score → call → collect results."""
-        campaign_id = campaign["campaign_id"]
-        
+        cid = campaign["campaign_id"]
+        svc = campaign["service_type"]
         try:
-            # Step 1: Search for providers
-            logger.info(f"🔍 Searching for {campaign['service_type']} near {campaign['location']}")
-            
-            await broadcast(group_id, {
-                "type": "campaign_status",
-                "campaign_id": campaign_id,
-                "status": "searching",
-                "message": f"Searching for {campaign['service_type']} providers..."
+            # --- STEP 1: Search providers ---
+            await _broadcast(group_id, {
+                "type": "campaign_status", "campaign_id": cid,
+                "status": "searching", "message": f"Searching for {svc} providers..."
             })
-            
-            providers = await places_service.search_providers(
-                category=campaign["service_type"],
-                location=campaign["location"],
+
+            providers, lat, lng = await places.search_providers(
+                category=svc, location=campaign["location"],
                 radius_miles=campaign["max_distance"]
             )
-            
+            campaign["origin_lat"], campaign["origin_lng"] = lat, lng
+
             if not providers:
                 campaign["status"] = "no_providers"
-                await broadcast(group_id, {
-                    "type": "campaign_status",
-                    "campaign_id": campaign_id,
-                    "status": "no_providers",
-                    "message": f"No {campaign['service_type']} providers found nearby."
+                await _broadcast(group_id, {
+                    "type": "campaign_status", "campaign_id": cid,
+                    "status": "no_providers", "message": f"No {svc} providers found."
                 })
                 return
-            
-            # Step 2: Get distances
-            logger.info(f"📏 Getting distances for {len(providers)} providers")
-            
-            # Geocode the user's location for distance calculation
-            import httpx
-            from app.config import settings
-            geo_url = "https://maps.googleapis.com/maps/api/geocode/json"
-            async with httpx.AsyncClient() as client:
-                geo_resp = await client.get(geo_url, params={
-                    "address": campaign["location"],
-                    "key": settings.google_maps_api_key
-                })
-                geo_data = geo_resp.json()
-                if geo_data.get("results"):
-                    origin_lat = geo_data["results"][0]["geometry"]["location"]["lat"]
-                    origin_lng = geo_data["results"][0]["geometry"]["location"]["lng"]
-                else:
-                    origin_lat, origin_lng = 42.3601, -71.0589  # Default Boston
-            
-            destinations = [
-                {"lat": p["lat"], "lng": p["lng"], "provider_id": p["place_id"]}
-                for p in providers
-            ]
-            distances = await distance_service.get_distances(origin_lat, origin_lng, destinations)
-            
-            # Attach distances to providers
+
+            # --- STEP 2: Get distances ---
+            dests = [{"lat": p["lat"], "lng": p["lng"], "provider_id": p["provider_id"]} for p in providers]
+            dist_map = await distances.get_distances(lat, lng, dests)
+
             for p in providers:
-                dist_info = distances.get(p["place_id"], {})
-                p["distance_miles"] = dist_info.get("distance_miles", 999)
-                p["travel_minutes"] = dist_info.get("duration_minutes", 999)
-                p["distance_text"] = dist_info.get("distance_text", "")
-                p["duration_text"] = dist_info.get("duration_text", "")
-                p["provider_id"] = p["place_id"]  # Use place_id as provider_id
-            
-            # Filter by max distance
+                d = dist_map.get(p["provider_id"], {})
+                p["distance_miles"] = d.get("distance_miles", 999)
+                p["travel_minutes"] = d.get("duration_minutes", 999)
+                p["distance_text"] = d.get("distance_text", "")
+                p["duration_text"] = d.get("duration_text", "")
+
+            # Filter + sort + limit
             providers = [p for p in providers if p["distance_miles"] <= campaign["max_distance"]]
-            
-            # Step 3: Sort by initial score and take top N
             providers.sort(key=lambda p: (-p.get("rating", 0), p.get("distance_miles", 999)))
             providers = providers[:campaign["max_providers"]]
-            
             campaign["providers"] = providers
-            
-            # Push providers to frontend
-            await broadcast(group_id, {
-                "type": "providers_found",
-                "campaign_id": campaign_id,
-                "providers": providers,
-                "origin": {"lat": origin_lat, "lng": origin_lng}
+
+            # --- DB PERSISTENCE: Cache providers in database ---
+            for prov in providers:
+                try:
+                    db_prov = await db.upsert_provider({
+                        "place_id": prov["provider_id"],
+                        "name": prov["name"],
+                        "phone": prov.get("phone") or prov.get("international_phone") or "",
+                        "address": prov.get("address", ""),
+                        "category": svc,
+                        "latitude": prov.get("lat", 0),
+                        "longitude": prov.get("lng", 0),
+                        "rating": prov.get("rating"),
+                        "total_ratings": prov.get("total_ratings", 0),
+                    })
+                    prov["db_id"] = db_prov["id"]
+                    logger.info(f"💾 Provider saved: {prov['name']} → {db_prov['id']}")
+                except Exception as e:
+                    logger.warning(f"⚠️ DB upsert failed for provider {prov['name']}: {e}")
+
+            await asyncio.sleep(0.2)
+
+            await _broadcast(group_id, {
+                "type": "providers_found", "campaign_id": cid,
+                "providers": providers, "origin": {"lat": lat, "lng": lng}
             })
-            
-            # Step 4: Launch parallel calls
+
+            # --- STEP 3: Call preferred providers first ---
+            pref_names = [pp.get("name", "").lower() for pp in campaign.get("preferred_providers", [])]
+            preferred = [p for p in providers if p["name"].lower() in pref_names]
+            others = [p for p in providers if p["name"].lower() not in pref_names]
+            ordered = preferred + others
+
             campaign["status"] = "calling"
-            await broadcast(group_id, {
-                "type": "campaign_status",
-                "campaign_id": campaign_id,
-                "status": "calling",
-                "message": f"Calling {len(providers)} {campaign['service_type']} providers..."
+            await _broadcast(group_id, {
+                "type": "campaign_status", "campaign_id": cid,
+                "status": "calling", "message": f"Calling {len(ordered)} {svc} providers..."
             })
-            
-            call_tasks = []
-            for i, provider in enumerate(providers):
-                task = asyncio.create_task(
-                    CampaignManager._make_call(group_id, campaign_id, provider, i, campaign)
+
+            # --- STEP 4: Launch parallel calls ---
+            tasks = []
+            for i, prov in enumerate(ordered):
+                t = asyncio.create_task(
+                    CampaignManager._make_call(group_id, cid, prov, i, campaign)
                 )
-                call_tasks.append(task)
-                # Small delay between calls to avoid rate limits
-                await asyncio.sleep(1)
-            
-            # Wait for all calls to complete (with timeout)
-            await asyncio.gather(*call_tasks, return_exceptions=True)
-            
-            # Step 5: Compute final rankings
+                tasks.append(t)
+                await asyncio.sleep(1.5)
+
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            # --- STEP 5: Rank results ---
             campaign["status"] = "completed"
-            
-            # Rank by score
+            pref_name_list = [pp.get("name", "") for pp in campaign.get("preferred_providers", [])]
+            campaign["results"] = rank_results(
+                campaign["results"], campaign["providers"],
+                campaign["preferences"], pref_name_list, campaign["max_distance"]
+            )
+
             booked = [r for r in campaign["results"] if r.get("status") == "booked"]
             if booked:
-                booked.sort(key=lambda r: r.get("score", 0), reverse=True)
                 campaign["best_match"] = booked[0]
-            
-            await broadcast(group_id, {
-                "type": "campaign_complete",
-                "campaign_id": campaign_id,
-                "results": campaign["results"],
-                "best_match": campaign["best_match"],
+
+            # 💾 Update campaign status in DB
+            try:
+                db_campaign_id = campaign.get("db_id")
+                if db_campaign_id:
+                    await db.update_campaign(db_campaign_id, {
+                        "status": "completed",
+                        "completed_at": datetime.utcnow().isoformat(),
+                        "latitude": campaign.get("origin_lat", 0),
+                        "longitude": campaign.get("origin_lng", 0),
+                    })
+                    logger.info(f"💾 Campaign {db_campaign_id} marked completed in DB")
+            except Exception as e:
+                logger.warning(f"⚠️ DB campaign update failed: {e}")
+
+            await _broadcast(group_id, {
+                "type": "campaign_complete", "campaign_id": cid,
+                "results": campaign["results"], "best_match": campaign["best_match"],
             })
-            
-            logger.info(f"✅ Campaign {campaign_id} complete. {len(booked)} bookings found.")
-            
+            logger.info(f"✅ Campaign {cid} done. {len(booked)} bookings.")
+
         except Exception as e:
-            logger.error(f"❌ Campaign {campaign_id} error: {e}", exc_info=True)
+            logger.error(f"❌ Campaign {cid} error: {e}", exc_info=True)
             campaign["status"] = "error"
-            await broadcast(group_id, {
-                "type": "campaign_error",
-                "campaign_id": campaign_id,
-                "error": str(e)
+
+            # 💾 Update campaign status in DB
+            try:
+                db_campaign_id = campaign.get("db_id")
+                if db_campaign_id:
+                    await db.update_campaign(db_campaign_id, {
+                        "status": "failed",
+                        "completed_at": datetime.utcnow().isoformat(),
+                    })
+            except Exception as db_e:
+                logger.warning(f"⚠️ DB campaign error update failed: {db_e}")
+
+            await _broadcast(group_id, {
+                "type": "campaign_error", "campaign_id": cid, "error": str(e)
             })
-    
+
     @staticmethod
     async def _make_call(group_id: str, campaign_id: str, provider: dict, index: int, campaign: dict):
-        """Trigger a single outbound call to a provider."""
-        provider_id = provider["provider_id"]
-        provider_name = provider["name"]
+        pid = provider["provider_id"]
+        name = provider["name"]
         real_phone = provider.get("international_phone") or provider.get("phone", "")
-        
+
         if not real_phone:
-            logger.warning(f"⚠️ No phone number for {provider_name}, skipping")
-            await broadcast(group_id, {
-                "type": "call_skipped",
-                "campaign_id": campaign_id,
-                "provider_id": provider_id,
-                "provider_name": provider_name,
-                "reason": "No phone number available"
+            logger.warning(f"⚠️ No phone for {name}, skipping")
+            campaign["results"].append({"provider_id": pid, "provider_name": name, "status": "skipped", "reason": "No phone number"})
+            await _broadcast(group_id, {
+                "type": "call_skipped", "campaign_id": campaign_id,
+                "provider_id": pid, "provider_name": name, "reason": "No phone number"
             })
             return
-        
-        # Get actual number to call (safe or real)
+
         call_number = get_call_number(index, real_phone)
-        
-        # Push "call starting" to frontend
-        await broadcast(group_id, {
-            "type": "call_started",
-            "campaign_id": campaign_id,
-            "provider_id": provider_id,
-            "provider_name": provider_name,
+
+        await _broadcast(group_id, {
+            "type": "call_started", "campaign_id": campaign_id,
+            "provider_id": pid, "provider_name": name,
             "provider_rating": provider.get("rating", 0),
             "provider_distance": provider.get("distance_miles", 0),
-            "call_number": call_number,
+            "photo_url": provider.get("photo_url"),
         })
-        
-        # Build dynamic variables for the agent
+
+        # 🧠 Cross-Call Intelligence: inject current best offer
+        current_best = CampaignManager._get_best_offer(campaign)
+
         dynamic_vars = {
             "campaign_id": campaign_id,
-            "provider_id": provider_id,
-            "provider_name": provider_name,
+            "provider_id": pid,
+            "provider_name": name,
             "service_type": campaign["service_type"],
             "preferred_date": campaign.get("preferred_date", "this week"),
             "agent_name": "Alex",
-            "current_best_offer": CampaignManager._get_current_best_offer(campaign),
+            "current_best_offer": current_best,
         }
-        
-        # Trigger the call
+
         result = await trigger_outbound_call(call_number, dynamic_vars)
-        
+
         if result["success"]:
-            conversation_id = result["conversation_id"]
-            
-            # Store mapping so tool webhooks can find this campaign
-            conversation_map[conversation_id] = {
-                "group_id": group_id,
-                "campaign_id": campaign_id,
-                "provider_id": provider_id,
+            conv_id = result["conversation_id"]
+            conversation_map[conv_id] = {
+                "group_id": group_id, "campaign_id": campaign_id, "provider_id": pid
             }
-            
-            await broadcast(group_id, {
-                "type": "call_connected",
-                "campaign_id": campaign_id,
-                "provider_id": provider_id,
-                "conversation_id": conversation_id,
-            })
-            
-            # Wait for call to complete (poll for status)
-            # The tool webhooks will update the campaign state in real-time
-            # But we also poll to detect when the call ends
-            await CampaignManager._wait_for_call_completion(
-                group_id, campaign_id, provider_id, conversation_id, campaign
-            )
-        else:
-            logger.error(f"❌ Failed to call {provider_name}: {result.get('error')}")
-            await broadcast(group_id, {
-                "type": "call_failed",
-                "campaign_id": campaign_id,
-                "provider_id": provider_id,
-                "provider_name": provider_name,
-                "error": result.get("error", "Unknown error"),
-            })
-            campaign["results"].append({
-                "provider_id": provider_id,
-                "provider_name": provider_name,
-                "status": "failed",
-                "error": result.get("error"),
-            })
-    
-    @staticmethod
-    async def _wait_for_call_completion(
-        group_id: str, campaign_id: str, provider_id: str,
-        conversation_id: str, campaign: dict
-    ):
-        """Poll ElevenLabs to detect when a call ends, then fetch transcript."""
-        max_wait = 180  # 3 minutes max
-        poll_interval = 5  # Check every 5 seconds
-        elapsed = 0
-        
-        while elapsed < max_wait:
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
-            
-            # Check if tool webhooks already updated this provider's status
-            existing = next(
-                (r for r in campaign["results"] if r["provider_id"] == provider_id),
-                None
-            )
-            if existing and existing.get("status") in ["booked", "no_availability"]:
-                logger.info(f"✅ Call to {provider_id} already resolved via webhook")
-                break
-            
-            # Poll ElevenLabs for conversation status
+
+            # 💾 Persist call to Supabase
             try:
-                details = await get_conversation_details(conversation_id)
+                db_campaign_id = campaign.get("db_id")
+                db_provider_id = provider.get("db_id")
+                if db_campaign_id and db_provider_id:
+                    db_call = await db.create_call({
+                        "campaign_id": db_campaign_id,
+                        "provider_id": db_provider_id,
+                        "status": "connected",
+                        "started_at": datetime.utcnow().isoformat(),
+                        "transcript": json.dumps([]),
+                    })
+                    conversation_map[conv_id]["db_call_id"] = db_call["id"]
+                    logger.info(f"💾 Call saved to DB: {db_call['id']}")
+            except Exception as e:
+                logger.warning(f"⚠️ DB call insert failed: {e}")
+
+            await _broadcast(group_id, {
+                "type": "call_connected", "campaign_id": campaign_id,
+                "provider_id": pid, "conversation_id": conv_id,
+            })
+
+            await CampaignManager._wait_for_completion(group_id, campaign_id, pid, conv_id, campaign)
+        else:
+            logger.error(f"❌ Call to {name} failed: {result.get('error')}")
+            campaign["results"].append({
+                "provider_id": pid, "provider_name": name,
+                "status": "failed", "error": result.get("error"),
+            })
+
+            # 💾 Persist failed call to DB
+            try:
+                db_campaign_id = campaign.get("db_id")
+                db_provider_id = provider.get("db_id")
+                if db_campaign_id and db_provider_id:
+                    await db.create_call({
+                        "campaign_id": db_campaign_id,
+                        "provider_id": db_provider_id,
+                        "status": "failed",
+                        "started_at": datetime.utcnow().isoformat(),
+                        "ended_at": datetime.utcnow().isoformat(),
+                        "transcript": json.dumps([]),
+                    })
+            except Exception as e:
+                logger.warning(f"⚠️ DB failed-call insert failed: {e}")
+
+            await _broadcast(group_id, {
+                "type": "call_failed", "campaign_id": campaign_id,
+                "provider_id": pid, "provider_name": name, "error": result.get("error", ""),
+            })
+
+    @staticmethod
+    async def _wait_for_completion(group_id, campaign_id, provider_id, conv_id, campaign):
+        """Poll until call ends or tool webhooks resolve the result."""
+        max_wait, interval = 180, 5
+        elapsed = 0
+
+        while elapsed < max_wait:
+            await asyncio.sleep(interval)
+            elapsed += interval
+
+            existing = next((r for r in campaign["results"] if r["provider_id"] == provider_id), None)
+            if existing and existing.get("status") in ["booked", "no_availability"]:
+                break
+
+            try:
+                details = await get_conversation_details(conv_id)
                 status = details.get("status", "")
-                
                 if status in ["done", "ended", "failed"]:
-                    logger.info(f"📞 Call {conversation_id} ended with status: {status}")
-                    
-                    # If no webhook fired, create a result from the conversation data
                     if not existing:
-                        transcript = details.get("transcript", "")
                         campaign["results"].append({
                             "provider_id": provider_id,
-                            "provider_name": next(
-                                (p["name"] for p in campaign["providers"] if p["provider_id"] == provider_id),
-                                "Unknown"
-                            ),
-                            "status": "completed",
-                            "conversation_id": conversation_id,
-                            "transcript": transcript,
+                            "provider_name": next((p["name"] for p in campaign["providers"] if p["provider_id"] == provider_id), ""),
+                            "status": "completed", "conversation_id": conv_id,
                         })
-                    
-                    await broadcast(group_id, {
-                        "type": "call_ended",
-                        "campaign_id": campaign_id,
-                        "provider_id": provider_id,
-                        "conversation_id": conversation_id,
-                        "transcript": details.get("transcript", ""),
+                    # Fetch transcript
+                    transcript = details.get("transcript", [])
+                    formatted_transcript = []
+                    if isinstance(transcript, list):
+                        for t in transcript:
+                            formatted_transcript.append({
+                                "role": t.get("role", "unknown"),
+                                "message": t.get("message", ""),
+                                "time": t.get("time_in_call_secs", 0),
+                            })
+
+                    if formatted_transcript:
+                        await CampaignManager.update_provider_result(campaign_id, provider_id, {
+                            "transcript": formatted_transcript,
+                        })
+
+                    await _broadcast(group_id, {
+                        "type": "call_ended", "campaign_id": campaign_id,
+                        "provider_id": provider_id, "conversation_id": conv_id,
+                        "transcript": formatted_transcript,
                     })
                     break
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Poll error for {conversation_id}: {e}")
-        
+            except Exception:
+                pass
+
         if elapsed >= max_wait:
-            logger.warning(f"⏰ Call {conversation_id} timed out")
-            campaign["results"].append({
-                "provider_id": provider_id,
-                "status": "timeout",
-            })
-    
+            campaign["results"].append({"provider_id": provider_id, "status": "timeout"})
+
     @staticmethod
-    def _get_current_best_offer(campaign: dict) -> str:
-        """Get the best offer so far for cross-call intelligence."""
+    def _get_best_offer(campaign: dict) -> str:
+        """Cross-call intelligence: get best offer so far for negotiation leverage."""
         booked = [r for r in campaign.get("results", []) if r.get("status") == "booked"]
         if booked:
-            best = booked[0]
-            return f"{best.get('offered_slot', {}).get('date', '')} at {best.get('offered_slot', {}).get('time', '')} at {best.get('provider_name', '')}"
+            b = booked[0]
+            slot = b.get("offered_slot", {})
+            return f"{slot.get('date', '')} at {slot.get('time', '')} at {b.get('provider_name', '')}"
         return ""
-    
+
     @staticmethod
-    def get_campaign_group(group_id: str) -> Optional[dict]:
+    def get_group(group_id: str):
         return campaign_groups.get(group_id)
-    
+
     @staticmethod
-    def update_provider_result(campaign_id: str, provider_id: str, result_data: dict):
-        """Called by tool webhooks to update a provider's status."""
-        for group in campaign_groups.values():
-            for campaign in group["campaigns"]:
-                if campaign["campaign_id"] == campaign_id:
-                    # Update or add result
-                    existing = next(
-                        (r for r in campaign["results"] if r["provider_id"] == provider_id),
-                        None
-                    )
+    async def update_provider_result(campaign_id: str, provider_id: str, result_data: dict) -> Optional[str]:
+        """Update the in-memory campaign state with analysis results, then persist to DB."""
+        for gid, group in campaign_groups.items():
+            for camp in group["campaigns"]:
+                if camp["campaign_id"] == campaign_id:
+                    existing = next((r for r in camp["results"] if r.get("provider_id") == provider_id), None)
                     if existing:
                         existing.update(result_data)
                     else:
-                        result_data["provider_id"] = provider_id
-                        campaign["results"].append(result_data)
-                    return
+                        res = {"provider_id": provider_id, **result_data}
+                        camp["results"].append(res)
+
+                    # 💾 Update call in DB with results
+                    try:
+                        conv_entry = None
+                        for conv_id, ctx in conversation_map.items():
+                            if ctx.get("campaign_id") == campaign_id and ctx.get("provider_id") == provider_id:
+                                conv_entry = ctx
+                                break
+
+                        db_call_id = conv_entry.get("db_call_id") if conv_entry else None
+                        if db_call_id:
+                            update_data = {
+                                "status": result_data.get("status", "completed"),
+                                "ended_at": datetime.utcnow().isoformat(),
+                            }
+                            slot = result_data.get("offered_slot", {})
+                            if slot:
+                                update_data["offered_slot"] = json.dumps(slot) if isinstance(slot, dict) else str(slot)
+                            if result_data.get("score") is not None:
+                                update_data["score"] = result_data["score"]
+                            if result_data.get("transcript"):
+                                update_data["transcript"] = json.dumps(result_data["transcript"])
+
+                            await db.update_call(db_call_id, update_data)
+                            logger.info(f"💾 Call {db_call_id} updated in DB: {result_data.get('status')}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ DB call update failed: {e}")
+
+                    return gid
+        return None

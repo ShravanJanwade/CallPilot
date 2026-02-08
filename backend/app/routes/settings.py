@@ -1,12 +1,14 @@
 """
 User settings routes — manage user preferences and defaults.
+Uses Supabase for persistence.
 """
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
 import logging
 
-from app.routes.auth import get_current_user, users_db
+from app.routes.auth import get_current_user
+from app.database import update_user
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -85,8 +87,8 @@ async def update_settings(request: SettingsUpdateRequest, user: dict = Depends(g
     if request.timezone is not None:
         user["settings"]["timezone"] = request.timezone
     
-    # Save to in-memory store
-    users_db[user["id"]] = user
+    # Save to Supabase
+    await update_user(user["id"], {"settings": user.get("settings", {})})
     
     logger.info(f"⚙️ Settings updated for user {user['email']}")
     

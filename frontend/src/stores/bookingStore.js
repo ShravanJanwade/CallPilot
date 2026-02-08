@@ -79,7 +79,7 @@ export const useBookingStore = create((set, get) => ({
         radius_miles: String(state.maxDistance)
       })
       
-      const response = await fetch(`http://localhost:8000/api/providers/search?${params}`)
+      const response = await fetch(`http://localhost:8080/api/providers/search?${params}`)
       if (!response.ok) throw new Error('Provider search failed')
       
       const data = await response.json()
@@ -101,8 +101,8 @@ export const useBookingStore = create((set, get) => ({
     return {
       service_types: [state.serviceType],  // Backend expects array
       description: state.description,
-      date_range_start: state.dateRangeStart?.toISOString?.() || state.dateRangeStart,
-      date_range_end: state.dateRangeEnd?.toISOString?.() || state.dateRangeEnd,
+      date_range_start: state.dateRangeStart,
+      date_range_end: state.dateRangeEnd,
       time_preference: state.timePreference,
       duration: state.duration,
       location: state.location,
@@ -117,7 +117,7 @@ export const useBookingStore = create((set, get) => ({
       preferred_providers: state.preferredProviders,
       agent_name: state.agentName,
       first_message: state.firstMessage,
-      system_prompt: state.systemPrompt || null
+      system_prompt: state.systemPrompt
     }
   }
 }))

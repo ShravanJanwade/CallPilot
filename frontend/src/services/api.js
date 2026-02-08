@@ -1,151 +1,50 @@
-/**
- * API service layer for CallPilot frontend
- */
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-
-/**
- * Get auth token from localStorage (set by Google OAuth flow)
- */
-function getAuthToken() {
-  return localStorage.getItem('callpilot_token')
+// Get auth token from localStorage
+function getAuthHeaders() {
+  const token = localStorage.getItem('callpilot_token')
+  return token ? { 'Authorization': `Bearer ${token}` } : {}
 }
 
-/**
- * Make an authenticated API request
- */
-async function apiRequest(endpoint, options = {}) {
-  const token = getAuthToken()
-  
-  const headers = {
-    'Content-Type': 'application/json',
-    ...options.headers
-  }
-  
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
-  
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+async function request(path, options = {}) {
+  const res = await fetch(`${API}${path}`, {
+    headers: { 
+      'Content-Type': 'application/json', 
+      ...getAuthHeaders(),
+      ...options.headers 
+    },
     ...options,
-    headers
   })
-  
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Request failed' }))
-    throw new Error(error.detail || `API Error: ${response.status}`)
-  }
-  
-  return response.json()
+  return res.json()
 }
 
-// ============ Campaign API ============
+export const api = {
+  health: () => request('/health'),
 
-export const campaignApi = {
-  /**
-   * Start a new calling campaign
-   */
-  async startCampaign(formData) {
-    return apiRequest('/api/campaign/start', {
-      method: 'POST',
-      body: JSON.stringify(formData)
-    })
-  },
-  
-  /**
-   * Get campaign status
-   */
-  async getCampaign(campaignId) {
-    return apiRequest(`/api/campaign/${campaignId}`)
-  },
-  
-  /**
-   * Cancel an active campaign
-   */
-  async cancelCampaign(campaignId) {
-    return apiRequest(`/api/campaign/${campaignId}/cancel`, {
-      method: 'POST'
-    })
-  },
-  
-  /**
-   * Confirm a booking with a specific provider
-   */
-  async confirmBooking(campaignId, providerId) {
-    return apiRequest(`/api/campaign/${campaignId}/confirm/${providerId}`, {
-      method: 'POST'
-    })
-  }
-}
+  // Auth - uses /signin for ID token credential flow
+  googleAuth: (credential) => request('/api/auth/signin', {
+    method: 'POST', body: JSON.stringify({ credential }),
+  }),
+  getMe: () => request('/api/auth/me'),
 
-// ============ Provider API ============
+  // Campaign
+  startCampaign: (data) => request('/api/campaign/start', {
+    method: 'POST', body: JSON.stringify(data),
+  }),
+  getCampaign: (groupId) => request(`/api/campaign/${groupId}`),
+  cancelCampaign: (groupId) => request(`/api/campaign/${groupId}/cancel`, { method: 'POST' }),
+  optimizeCampaign: (groupId) => request(`/api/campaign/${groupId}/optimize`),
+  confirmProvider: (groupId, providerId) =>
+    request(`/api/campaign/${groupId}/confirm/${providerId}`, { method: 'POST' }),
 
-export const providerApi = {
-  /**
-   * Search for providers
-   */
-  async searchProviders(category, latitude, longitude, maxDistance = 10, maxResults = 10) {
-    const params = new URLSearchParams({
-      category,
-      latitude: latitude.toString(),
-      longitude: longitude.toString(),
-      max_distance: maxDistance.toString(),
-      max_results: maxResults.toString()
-    })
-    return apiRequest(`/api/providers/search?${params}`)
-  }
-}
+  // Bookings
+  getBookings: () => request('/api/tools/bookings'),
 
-// ============ Bookings API ============
+  // Providers
+  searchProviders: (category, location, radius = 10) =>
+    request(`/api/providers/search?category=${encodeURIComponent(category)}&location=${encodeURIComponent(location)}&radius=${radius}`),
 
-export const bookingsApi = {
-  /**
-   * Get all confirmed bookings
-   */
-  async getBookings() {
-    return apiRequest('/api/tools/bookings')
-  }
-}
-
-// ============ Auth API ============
-
-export const authApi = {
-  /**
-   * Google OAuth callback
-   */
-  async googleAuth(code) {
-    return apiRequest('/api/auth/google', {
-      method: 'POST',
-      body: JSON.stringify({ code })
-    })
-  },
-  
-  /**
-   * Get current user info
-   */
-  async getCurrentUser() {
-    return apiRequest('/api/auth/me')
-  },
-  
-  /**
-   * Logout (clears token)
-   */
-  logout() {
-    localStorage.removeItem('callpilot_token')
-    localStorage.removeItem('callpilot_user')
-  },
-  
-  /**
-   * Check if user is authenticated
-   */
-  isAuthenticated() {
-    return !!getAuthToken()
-  }
-}
-
-export default {
-  campaign: campaignApi,
-  provider: providerApi,
-  bookings: bookingsApi,
-  auth: authApi
+  // Calendar
+  getCalendarEvents: (start, end) =>
+    request(`/api/calendar/events?start=${start}&end=${end}`),
 }
