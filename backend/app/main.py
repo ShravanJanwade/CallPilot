@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import logging
 
 from app.config import settings
-from app.routes import booking, providers, ws, tools, campaign
+from app.routes import booking, providers, ws, tools, campaign, calendar_routes, webhooks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,12 +22,7 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 CallPilot shutting down...")
 
 
-app = FastAPI(
-    title="CallPilot",
-    description="Agentic Voice AI for Autonomous Appointment Scheduling",
-    version="0.2.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="CallPilot", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,23 +32,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# REST routes
 app.include_router(booking.router, prefix="/api/booking", tags=["Booking"])
 app.include_router(providers.router, prefix="/api/providers", tags=["Providers"])
 app.include_router(tools.router, prefix="/api/tools", tags=["Agent Tools"])
 app.include_router(campaign.router, prefix="/api/campaign", tags=["Campaign"])
-
-# WebSocket
+app.include_router(calendar_routes.router, prefix="/api/calendar", tags=["Calendar"])
+app.include_router(webhooks.router, prefix="/api/webhooks", tags=["Webhooks"])
 app.include_router(ws.router)
 
 
 @app.get("/health")
 async def health():
     return {
-        "status": "healthy",
-        "service": "CallPilot",
-        "version": "0.2.0",
-        "agent_id": settings.elevenlabs_agent_id[:10] + "...",
-        "phone_id": bool(settings.elevenlabs_phone_number_id),
+        "status": "healthy", "service": "CallPilot", "version": "0.3.0",
+        "phone_id_set": bool(settings.elevenlabs_phone_number_id),
         "spam_prevent": settings.spam_prevent,
     }

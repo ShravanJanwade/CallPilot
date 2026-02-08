@@ -259,9 +259,26 @@ class CampaignManager:
                             "provider_name": next((p["name"] for p in campaign["providers"] if p["provider_id"] == provider_id), ""),
                             "status": "completed", "conversation_id": conv_id,
                         })
+                    # Fetch transcript
+                    transcript = details.get("transcript", [])
+                    formatted_transcript = []
+                    if isinstance(transcript, list):
+                        for t in transcript:
+                            formatted_transcript.append({
+                                "role": t.get("role", "unknown"),
+                                "message": t.get("message", ""),
+                                "time": t.get("time_in_call_secs", 0),
+                            })
+
+                    if formatted_transcript:
+                        CampaignManager.update_provider_result(campaign_id, provider_id, {
+                            "transcript": formatted_transcript,
+                        })
+
                     await _broadcast(group_id, {
                         "type": "call_ended", "campaign_id": campaign_id,
                         "provider_id": provider_id, "conversation_id": conv_id,
+                        "transcript": formatted_transcript,
                     })
                     break
             except Exception:

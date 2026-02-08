@@ -64,6 +64,34 @@ class CalendarService:
         self.service = build("calendar", "v3", credentials=creds)
         logger.info("✅ Google Calendar service initialized.")
 
+    def get_events(self, start_date: str, end_date: str) -> list[dict]:
+        """Get calendar events between two dates (YYYY-MM-DD)."""
+        try:
+            start = datetime.strptime(start_date, "%Y-%m-%d").isoformat() + "Z"
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            end = end_dt.isoformat() + "Z"
+
+            result = self.service.events().list(
+                calendarId="primary",
+                timeMin=start, timeMax=end,
+                singleEvents=True, orderBy="startTime"
+            ).execute()
+
+            events = []
+            for e in result.get("items", []):
+                events.append({
+                    "id": e.get("id"),
+                    "summary": e.get("summary", "Busy"),
+                    "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
+                    "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
+                    "all_day": "date" in e.get("start", {}),
+                })
+            logger.info(f"📅 Fetched {len(events)} events from {start_date} to {end_date}")
+            return events
+        except Exception as e:
+            logger.error(f"❌ Get events error: {e}")
+            return []
+
     def check_availability(self, date_str: str, time_str: str,
                            duration_minutes: int = 60) -> bool:
         """

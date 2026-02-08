@@ -125,6 +125,19 @@ export const useCampaignStore = create((set, get) => ({
               ...s.calls[msg.provider_id],
               status: s.calls[msg.provider_id]?.status === 'booked'
                 ? 'booked' : 'completed',
+              transcript: msg.transcript || s.calls[msg.provider_id]?.transcript || [],
+            }
+          }
+        })
+        break
+
+      case 'transcript_loaded':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              transcript: msg.transcript || [],
             }
           }
         })
