@@ -34,7 +34,6 @@ app.add_middleware(
 )
 
 app.include_router(booking.router, prefix="/api/booking", tags=["Booking"])
-app.include_router(calendar.router, prefix="/api/calendar", tags=["Calendar"])
 app.include_router(campaign.router, prefix="/api/campaign", tags=["Campaign"])
 app.include_router(providers.router, prefix="/api/providers", tags=["Providers"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["Settings"])
