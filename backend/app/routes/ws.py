@@ -1,6 +1,7 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+"""WebSocket manager — push real-time updates to frontend."""
 import json
 import logging
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -8,23 +9,32 @@ logger = logging.getLogger(__name__)
 active_connections: dict[str, list[WebSocket]] = {}
 
 
-@router.websocket("/ws/transcript/{session_id}")
-async def transcript_stream(ws: WebSocket, session_id: str):
+@router.websocket("/ws/transcript/{room_id}")
+async def websocket_endpoint(ws: WebSocket, room_id: str):
     await ws.accept()
-    if session_id not in active_connections:
-        active_connections[session_id] = []
-    active_connections[session_id].append(ws)
-    logger.info(f"Client connected to session {session_id}")
-
+    if room_id not in active_connections:
+        active_connections[room_id] = []
+    active_connections[room_id].append(ws)
+    logger.info(f"📡 WS connected: {room_id} ({len(active_connections[room_id])} clients)")
     try:
         while True:
-            data = await ws.receive_text()
+            await ws.receive_text()
     except WebSocketDisconnect:
-        active_connections[session_id].remove(ws)
-        logger.info(f"Client disconnected from session {session_id}")
+        if room_id in active_connections and ws in active_connections[room_id]:
+            active_connections[room_id].remove(ws)
+        logger.info(f"📡 WS disconnected: {room_id}")
 
 
-async def broadcast(session_id: str, message: dict):
-    if session_id in active_connections:
-        for ws in active_connections[session_id]:
-            await ws.send_text(json.dumps(message))
+async def broadcast(room_id: str, message: dict):
+    """Send message to all WebSocket clients in a room."""
+    if room_id not in active_connections or not active_connections[room_id]:
+        return
+    msg = json.dumps(message, default=str)
+    dead = []
+    for ws in active_connections[room_id]:
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        active_connections[room_id].remove(ws)
