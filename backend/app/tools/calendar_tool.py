@@ -44,28 +44,42 @@ class CalendarService:
             if creds and creds.expired and creds.refresh_token:
                 logger.info("🔄 Refreshing Google Calendar token...")
                 creds.refresh(GoogleAuthRequest())
+                # Save refreshed token
+                with open(TOKEN_PATH, "w") as f:
+                    f.write(creds.to_json())
             else:
-                logger.info("🔐 Starting Google Calendar OAuth flow...")
+                # In production (Cloud Run), we can't open a browser
+                # token.json must already exist from local auth
                 creds_path = settings.google_calendar_credentials_path
-                if not os.path.exists(creds_path):
-                    raise FileNotFoundError(
-                        f"Google credentials not found at {creds_path}. "
-                        "Download OAuth 2.0 credentials from Google Cloud Console."
-                    )
-                flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-                creds = flow.run_local_server(port=0)
+                if os.getenv("K_SERVICE"):
+                    # Running in Cloud Run — skip browser auth
+                    logger.warning("⚠️ Running in Cloud Run — cannot do OAuth browser flow. "
+                                   "Make sure credentials/token.json is included in the Docker image.")
+                    self.service = None
+                    return
+                else:
+                    logger.info("🔐 Starting Google Calendar OAuth flow...")
+                    if not os.path.exists(creds_path):
+                        raise FileNotFoundError(
+                            f"Google credentials not found at {creds_path}."
+                        )
+                    flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+                    creds = flow.run_local_server(port=0)
 
-            # Save token for next time
-            os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-            with open(TOKEN_PATH, "w") as token_file:
-                token_file.write(creds.to_json())
-            logger.info("✅ Google Calendar token saved.")
+                # Save token for next time
+                os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
+                with open(TOKEN_PATH, "w") as token_file:
+                    token_file.write(creds.to_json())
+                logger.info("✅ Google Calendar token saved.")
 
         self.service = build("calendar", "v3", credentials=creds)
         logger.info("✅ Google Calendar service initialized.")
 
     def get_events(self, start_date: str, end_date: str) -> list[dict]:
         """Get calendar events between two dates (YYYY-MM-DD)."""
+        if not self.service:
+            logger.warning("⚠️ Calendar not connected — returning empty events")
+            return []
         try:
             start = datetime.strptime(start_date, "%Y-%m-%d").isoformat() + "Z"
             end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
