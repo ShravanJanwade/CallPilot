@@ -1,5 +1,7 @@
+import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './stores/authStore'
+import { useThemeStore } from './stores/themeStore'
 import Landing from './pages/Landing'
 import AuthCallback from './pages/AuthCallback'
 import Dashboard from './pages/Dashboard'
@@ -23,6 +25,12 @@ function ProtectedRoute({ children }) {
 
 function App() {
   const { isAuthenticated } = useAuthStore()
+  const { initTheme } = useThemeStore()
+
+  // Initialize theme on mount
+  useEffect(() => {
+    initTheme()
+  }, [initTheme])
 
   return (
     <BrowserRouter>
