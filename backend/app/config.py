@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     # -- ElevenLabs --
     elevenlabs_api_key: str = ""
     elevenlabs_agent_id: str = ""  # Conversational AI agent ID
+    elevenlabs_phone_number_id: str = ""  # Twilio phone number imported to ElevenLabs
 
     # -- Twilio --
     twilio_account_sid: str = ""
@@ -21,6 +22,14 @@ class Settings(BaseSettings):
     # -- Google APIs --
     google_calendar_credentials_path: str = "credentials/google_creds.json"
     google_maps_api_key: str = ""
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    google_oauth_redirect_uri: str = "http://localhost:5173/auth/callback"
+
+    # -- JWT --
+    jwt_secret: str = "your-secret-key-change-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_expiration_hours: int = 24
 
     # -- Concurrency --
     max_parallel_calls: int = 15  # Swarm mode cap
@@ -35,6 +44,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+
 
 
 @lru_cache()

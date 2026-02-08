@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import logging
 
 from app.config import settings
-from app.routes import booking, providers, ws, tools
+from app.routes import auth, booking, campaign, dashboard, providers, settings as settings_routes, ws, tools
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,8 +36,12 @@ app.add_middleware(
 )
 
 # REST routes
+app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(booking.router, prefix="/api/booking", tags=["Booking"])
+app.include_router(campaign.router, prefix="/api/campaign", tags=["Campaign"])
 app.include_router(providers.router, prefix="/api/providers", tags=["Providers"])
+app.include_router(settings_routes.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(tools.router, prefix="/api/tools", tags=["Agent Tools"])
 
 # WebSocket for live transcript streaming
