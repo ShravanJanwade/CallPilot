@@ -79,3 +79,22 @@ async def confirm_provider(group_id: str, provider_id: str):
                     "service_type": camp["service_type"],
                 }
     return {"confirmed": False, "error": "Booking not found"}
+
+
+@router.post("/{group_id}/call/{provider_id}/command")
+async def send_call_command(group_id: str, provider_id: str, provider_id_again: str = None, request: Request = None):
+    """
+    Send a command to an active call.
+    Note: provider_id_again argument is a workaround for potential path param conflicts if not named carefully, 
+    but here we just use the path param provider_id. 
+    """
+    # Fix: FastAPI might get confused if I redeclare params? No.
+    # provider_id is in path. request is body.
+    return await send_call_command_impl(group_id, provider_id, request)
+
+async def send_call_command_impl(group_id: str, provider_id: str, request: Request):
+    data = await request.json()
+    action = data.get("action", "")
+    message = data.get("message", "")
+    
+    return await CampaignManager.handle_user_command(group_id, provider_id, action, message)

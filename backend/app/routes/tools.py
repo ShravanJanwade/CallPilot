@@ -13,6 +13,9 @@ import asyncio
 router = APIRouter()
 logger = logging.getLogger(__name__)
 from app import database as db
+from app.routes.ws import broadcast
+from app.scoring.ranker import compute_score
+from app.agents.swarm_orchestrator import campaign_groups
 
 confirmed_bookings = []
 _calendar_service = None
@@ -80,6 +83,49 @@ async def check_calendar(request: Request):
         "tool": "check_calendar", "params": {"date": date, "time": time}
     })
 
+    # Compute & Broadcast Predicted Score
+    if cid and pid:
+        try:
+            # Find campaign and provider
+            found_group = None
+            found_campaign = None
+            found_provider = None
+            
+            for gid, group in campaign_groups.items():
+                for camp in group["campaigns"]:
+                    if camp["campaign_id"] == cid:
+                        found_group = group
+                        found_campaign = camp
+                        found_provider = next((p for p in camp["providers"] if p["provider_id"] == pid), None)
+                        break
+                if found_campaign:
+                    break
+            
+            if found_campaign and found_provider:
+                # Calculate score assuming this slot acts as "negotiating" or "booked"
+                predicted_score = compute_score(
+                    {"offered_slot": {"date": date, "time": time}, "status": "negotiating"},
+                    found_provider,
+                    found_campaign["preferences"],
+                    [p.get("name","") for p in found_campaign.get("preferred_providers", [])],
+                    found_campaign["max_distance"]
+                )
+                
+                # Check if this is the best score so far
+                current_best = max((r.get("score", 0) for r in found_campaign["results"]), default=0)
+                is_best = predicted_score > current_best
+                
+                asyncio.create_task(broadcast(found_group["group_id"], {
+                    "type": "score_update",
+                    "campaign_id": cid,
+                    "provider_id": pid,
+                    "predicted_score": predicted_score,
+                    "offered_slot": {"date": date, "time": time},
+                    "is_best": is_best,
+                }))
+        except Exception as e:
+            logger.error(f"⚠️ Live score calc failed: {e}")
+
     # Try real Google Calendar
     try:
         cal = get_calendar()
@@ -95,34 +141,6 @@ async def check_calendar(request: Request):
     if time.startswith("14:"):
         return {"available": False, "message": f"Conflict on {date} at {time}. Ask for alternative."}
     return {"available": True, "message": f"User is free on {date} at {time}. Proceed to confirm."}
-
-    # Broadcast result
-    if campaign_id:
-        await broadcast(campaign_id, {
-            "type": "tool_result",
-            "campaign_id": campaign_id,
-            "provider_id": provider_id,
-            "tool": "check_calendar",
-            "result": result
-        })
-        
-        # If slot is available, broadcast slot_offered event
-        if is_available:
-            await broadcast(campaign_id, {
-                "type": "slot_offered",
-                "campaign_id": campaign_id,
-                "provider_id": provider_id,
-                "date": proposed_date,
-                "time": proposed_time
-            })
-            
-            # Update campaign manager
-            CampaignManager.update_provider_result(campaign_id, provider_id, {
-                "status": "negotiating",
-                "offered_slot": {"date": proposed_date, "time": proposed_time}
-            })
-
-    return result
 
 
 @router.post("/confirm-booking")

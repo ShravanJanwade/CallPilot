@@ -37,6 +37,12 @@ export const api = {
   confirmProvider: (groupId, providerId) =>
     request(`/api/campaign/${groupId}/confirm/${providerId}`, { method: 'POST' }),
 
+  sendCallCommand: (groupId, providerId, action, message = '') =>
+    request(`/api/campaign/${groupId}/call/${providerId}/command`, {
+      method: 'POST',
+      body: JSON.stringify({ action, message }),
+    }),
+
   // Bookings
   getBookings: () => request('/api/tools/bookings'),
 

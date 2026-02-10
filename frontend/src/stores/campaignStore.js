@@ -194,6 +194,71 @@ export const useCampaignStore = create((set, get) => ({
         })
         break
 
+      case 'transcript_update':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              transcript: [
+                ...(s.calls[msg.provider_id]?.transcript || []),
+                ...msg.new_entries,
+              ],
+            }
+          }
+        })
+        break
+
+      case 'transcript_final':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              transcript: msg.transcript,
+            }
+          }
+        })
+        break
+
+      case 'score_update':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              predictedScore: msg.predicted_score,
+              offeredSlot: msg.offered_slot,
+              isBest: msg.is_best,
+            }
+          }
+        })
+        break
+
+      case 'call_disconnected':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              status: 'disconnected',
+            }
+          }
+        })
+        break
+
+      case 'user_instruction':
+        set({
+          calls: {
+            ...s.calls,
+            [msg.provider_id]: {
+              ...s.calls[msg.provider_id],
+              userInstruction: msg.message,
+            }
+          }
+        })
+        break
+
       case 'campaign_error':
         set({ status: 'error', message: msg.error })
         break

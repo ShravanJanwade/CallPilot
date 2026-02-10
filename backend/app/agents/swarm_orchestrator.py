@@ -7,9 +7,11 @@ import asyncio
 import uuid
 import json
 import logging
+import httpx
 from datetime import datetime
 from typing import Optional
 
+from app.config import settings
 from app.tools.places_tool import PlacesService
 from app.tools.distance_tool import DistanceService
 from app.telephony.call_manager import trigger_outbound_call, get_call_number, get_conversation_details
@@ -191,16 +193,33 @@ class CampaignManager:
                 "status": "calling", "message": f"Calling {len(ordered)} {svc} providers..."
             })
 
-            # --- STEP 4: Launch parallel calls ---
-            tasks = []
-            for i, prov in enumerate(ordered):
-                t = asyncio.create_task(
-                    CampaignManager._make_call(group_id, cid, prov, i, campaign)
-                )
-                tasks.append(t)
-                await asyncio.sleep(1.5)
+            # --- STEP 4: Launch parallel calls (Two Waves) ---
+            # Wave 1: Preferred providers (immediate)
+            # Wave 2: All others (after 3 seconds, with best offer from wave 1)
+            preferred_tasks = []
+            other_tasks = []
 
-            await asyncio.gather(*tasks, return_exceptions=True)
+            for i, prov in enumerate(ordered):
+                if prov["name"].lower() in pref_names:
+                    preferred_tasks.append((i, prov))
+                else:
+                    other_tasks.append((i, prov))
+
+            # Launch wave 1
+            wave1 = [asyncio.create_task(CampaignManager._make_call(group_id, cid, prov, i, campaign)) for i, prov in preferred_tasks]
+            for t in wave1:
+                await asyncio.sleep(0.3)
+
+            # Wait a bit for wave 1 to get initial offers
+            if wave1 and other_tasks:
+                await asyncio.sleep(3)
+
+            # Launch wave 2 — these get cross-call intelligence from wave 1
+            wave2 = [asyncio.create_task(CampaignManager._make_call(group_id, cid, prov, i, campaign)) for i, prov in other_tasks]
+            for t in wave2:
+                await asyncio.sleep(0.3)
+
+            await asyncio.gather(*(wave1 + wave2), return_exceptions=True)
 
             # --- STEP 5: Rank results ---
             campaign["status"] = "completed"
@@ -254,6 +273,122 @@ class CampaignManager:
             })
 
     @staticmethod
+    async def handle_user_command(group_id: str, provider_id: str, action: str, message: str = "") -> dict:
+        """Handle user command to disconnect or instruct an active call."""
+        
+        # Find conversation
+        conv_id = None
+        for cid, mapping in conversation_map.items():
+            if mapping["group_id"] == group_id and mapping["provider_id"] == provider_id:
+                conv_id = cid
+                break
+        
+        if not conv_id:
+            return {"error": "No active call for this provider"}
+
+        if action == "disconnect":
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.delete(
+                        f"https://api.elevenlabs.io/v1/convai/conversations/{conv_id}",
+                        headers={"xi-api-key": settings.elevenlabs_api_key}
+                    )
+                    logger.info(f"📞 Disconnect call {conv_id}: {resp.status_code}")
+            except Exception as e:
+                logger.error(f"Disconnect error: {e}")
+            
+            # Update status in memory immediately
+            group = CampaignManager.get_group(group_id)
+            if group:
+                for camp in group["campaigns"]:
+                    for r in camp["results"]:
+                        if r.get("provider_id") == provider_id:
+                            r["status"] = "disconnected"
+
+            await _broadcast(group_id, {
+                "type": "call_disconnected",
+                "provider_id": provider_id,
+                "reason": "User disconnected",
+            })
+            return {"success": True, "action": "disconnected"}
+        
+        elif action == "instruct":
+            await _broadcast(group_id, {
+                "type": "user_instruction",
+                "provider_id": provider_id,
+                "message": message,
+            })
+            return {"success": True, "action": "instruction_sent"}
+            
+        return {"error": "Unknown action"}
+
+    @staticmethod
+    async def _poll_transcript(group_id: str, campaign_id: str, provider_id: str, conversation_id: str):
+        """Poll ElevenLabs every 2s for transcript updates during the call."""
+        last_count = 0
+        while True:
+            await asyncio.sleep(2)
+            try:
+                details = await get_conversation_details(conversation_id)
+                transcript = details.get("transcript", [])
+                
+                if isinstance(transcript, list) and len(transcript) > last_count:
+                    # New transcript entries — send only the new ones
+                    new_entries = transcript[last_count:]
+                    formatted = []
+                    for entry in new_entries:
+                        formatted.append({
+                            "role": entry.get("role", "unknown"),
+                            "message": entry.get("message", ""),
+                            "time": entry.get("time_in_call_secs", 0),
+                        })
+                    
+                    await _broadcast(group_id, {
+                        "type": "transcript_update",
+                        "campaign_id": campaign_id,
+                        "provider_id": provider_id,
+                        "new_entries": formatted,
+                        "total_entries": len(transcript),
+                    })
+                    last_count = len(transcript)
+                
+                # Check if call ended
+                status = details.get("status", "")
+                if status in ["done", "ended", "failed"]:
+                    # Send final full transcript
+                    all_formatted = [{
+                        "role": e.get("role", "unknown"),
+                        "message": e.get("message", ""),
+                        "time": e.get("time_in_call_secs", 0),
+                    } for e in transcript] if isinstance(transcript, list) else []
+                    
+                    await _broadcast(group_id, {
+                        "type": "transcript_final",
+                        "campaign_id": campaign_id,
+                        "provider_id": provider_id,
+                        "transcript": all_formatted,
+                    })
+                    break
+            except Exception as e:
+                # logger.warning(f"Transcript poll error: {e}")
+                continue
+
+    @staticmethod
+    async def _compute_live_score(campaign, provider, offered_slot=None):
+        """Compute score in real-time as call progresses."""
+        from app.scoring.ranker import compute_score
+        
+        if offered_slot:
+            result = {"offered_slot": offered_slot, "status": "booked"}
+        else:
+            # Estimate based on what we know
+            result = {"offered_slot": None, "status": "negotiating"}
+        
+        pref_names = [p.get("name", "") for p in campaign.get("preferred_providers", [])]
+        score = compute_score(result, provider, campaign["preferences"], pref_names, campaign["max_distance"])
+        return score
+
+    @staticmethod
     async def _make_call(group_id: str, campaign_id: str, provider: dict, index: int, campaign: dict):
         pid = provider["provider_id"]
         name = provider["name"]
@@ -298,6 +433,9 @@ class CampaignManager:
             conversation_map[conv_id] = {
                 "group_id": group_id, "campaign_id": campaign_id, "provider_id": pid
             }
+
+            # Start transcript polling in background
+            asyncio.create_task(CampaignManager._poll_transcript(group_id, campaign_id, pid, conv_id))
 
             # 💾 Persist call to Supabase
             try:
@@ -404,13 +542,33 @@ class CampaignManager:
 
     @staticmethod
     def _get_best_offer(campaign: dict) -> str:
-        """Cross-call intelligence: get best offer so far for negotiation leverage."""
+        """Build a negotiation context string from all current results."""
         booked = [r for r in campaign.get("results", []) if r.get("status") == "booked"]
-        if booked:
-            b = booked[0]
-            slot = b.get("offered_slot", {})
-            return f"{slot.get('date', '')} at {slot.get('time', '')} at {b.get('provider_name', '')}"
-        return ""
+        
+        # Also include slots that were offered but not yet confirmed (from check_calendar calls)
+        negotiating = [r for r in campaign.get("results", []) if r.get("offered_slot")]
+        
+        all_offers = booked + negotiating
+        if not all_offers:
+            return ""
+        
+        # Sort by score
+        all_offers.sort(key=lambda r: r.get("score", 0), reverse=True)
+        best = all_offers[0]
+        slot = best.get("offered_slot", {})
+        
+        parts = []
+        parts.append(f"{slot.get('date', '')} at {slot.get('time', '')} at {best.get('provider_name', '')}")
+        
+        if best.get("score", 0) > 0.7:
+            parts.append("This is a strong offer, so only accept something clearly better")
+        elif best.get("score", 0) > 0.5:
+            parts.append("This is a decent offer but there might be better options")
+        
+        if len(all_offers) > 1:
+            parts.append(f"You have {len(all_offers)} offers total")
+        
+        return ". ".join(parts)
 
     @staticmethod
     def get_group(group_id: str):

@@ -1,133 +1,242 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Phone, CheckCircle, XCircle, AlertCircle, Clock, Star, MapPin, ChevronDown, ChevronUp, Loader2, Wrench } from 'lucide-react'
-import TranscriptView from './TranscriptView'
+import { Phone, CheckCircle, XCircle, AlertCircle, Clock, Star, MapPin, ChevronDown, ChevronUp, Loader2, Wrench, MessageSquare, PhoneOff, Mic, Send } from 'lucide-react'
+import { api } from '../../services/api'
+import { useCampaignStore } from '../../stores/campaignStore'
 
 const STATUS = {
     queued: { bg: 'bg-white', border: 'border-slate-200', icon: Clock, iconColor: 'text-slate-400', label: 'Queued', labelBg: 'bg-slate-100 text-slate-500' },
-    ringing: { bg: 'bg-amber-50/30', border: 'border-amber-200', icon: Phone, iconColor: 'text-amber-500', label: 'Calling...', labelBg: 'bg-amber-100 text-amber-600', pulse: true },
-    connected: { bg: 'bg-blue-50/30', border: 'border-blue-200', icon: Phone, iconColor: 'text-blue-500', label: 'Connected', labelBg: 'bg-blue-100 text-blue-600' },
-    negotiating: { bg: 'bg-purple-50/30', border: 'border-purple-200', icon: Wrench, iconColor: 'text-purple-500', label: 'Negotiating...', labelBg: 'bg-purple-100 text-purple-600', spin: true },
-    booked: { bg: 'bg-emerald-50/40', border: 'border-emerald-300', icon: CheckCircle, iconColor: 'text-emerald-500', label: 'Booked ✓', labelBg: 'bg-emerald-100 text-emerald-700' },
-    no_availability: { bg: 'bg-red-50/30', border: 'border-red-200', icon: XCircle, iconColor: 'text-red-400', label: 'No Slots', labelBg: 'bg-red-100 text-red-500' },
+    ringing: { bg: 'bg-amber-50', border: 'border-amber-200', icon: Phone, iconColor: 'text-amber-500', label: 'Calling...', labelBg: 'bg-amber-100 text-amber-600', pulse: true },
+    connected: { bg: 'bg-blue-50', border: 'border-blue-200', icon: Phone, iconColor: 'text-blue-500', label: 'Connected', labelBg: 'bg-blue-100 text-blue-600' },
+    negotiating: { bg: 'bg-purple-50', border: 'border-purple-200', icon: Wrench, iconColor: 'text-purple-500', label: 'Negotiating...', labelBg: 'bg-purple-100 text-purple-600', spin: true },
+    booked: { bg: 'bg-emerald-50', border: 'border-emerald-300', icon: CheckCircle, iconColor: 'text-emerald-500', label: 'Booked ✓', labelBg: 'bg-emerald-100 text-emerald-700' },
+    no_availability: { bg: 'bg-red-50', border: 'border-red-200', icon: XCircle, iconColor: 'text-red-400', label: 'No Slots', labelBg: 'bg-red-100 text-red-500' },
     failed: { bg: 'bg-slate-50', border: 'border-slate-200', icon: AlertCircle, iconColor: 'text-slate-400', label: 'Failed', labelBg: 'bg-slate-100 text-slate-500' },
     skipped: { bg: 'bg-slate-50', border: 'border-slate-200', icon: AlertCircle, iconColor: 'text-slate-300', label: 'Skipped', labelBg: 'bg-slate-100 text-slate-400' },
     completed: { bg: 'bg-white', border: 'border-slate-200', icon: CheckCircle, iconColor: 'text-slate-400', label: 'Done', labelBg: 'bg-slate-100 text-slate-500' },
+    disconnected: { bg: 'bg-orange-50', border: 'border-orange-200', icon: PhoneOff, label: 'Disconnected', labelBg: 'bg-orange-100 text-orange-600', iconColor: 'text-orange-500' },
 }
 
 export default function CallCard({ call, onConfirm }) {
-    const [expanded, setExpanded] = useState(false)
+    const [showInput, setShowInput] = useState(false)
+    const [instruction, setInstruction] = useState('')
+    const [isDisconnecting, setIsDisconnecting] = useState(false)
+    const scrollRef = useRef(null)
+    const { groupId } = useCampaignStore()
+
     const cfg = STATUS[call.status] || STATUS.queued
     const Icon = cfg.icon
-    const hasTranscript = call.transcript && call.transcript.length > 0
+    const isActive = ['ringing', 'connected', 'negotiating'].includes(call.status)
+    const score = call.predictedScore || call.score || 0
+
+    // Auto-scroll transcript
+    useEffect(() => {
+        if (scrollRef.current) {
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+        }
+    }, [call.transcript])
+
+    // Timer
+    const [duration, setDuration] = useState(0)
+    useEffect(() => {
+        if (!isActive) return
+        const start = Date.now()
+        const int = setInterval(() => setDuration(Math.floor((Date.now() - start) / 1000)), 1000)
+        return () => clearInterval(int)
+    }, [isActive, call.status])
+
+    const fmtTime = (s) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`
+
+    const handleSendInstruction = async () => {
+        if (!instruction.trim()) return
+        await api.sendCallCommand(groupId, call.providerId || call.provider_id, 'instruct', instruction)
+        setInstruction('')
+        setShowInput(false)
+    }
+
+    const handleDisconnect = async () => {
+        if (!window.confirm("Are you sure you want to disconnect this call?")) return
+        setIsDisconnecting(true)
+        try {
+            await api.sendCallCommand(groupId, call.providerId || call.provider_id, 'disconnect')
+        } catch (e) {
+            console.error(e)
+            setIsDisconnecting(false)
+        }
+    }
+
+    // Determine fallback ID if needed
+    const pid = call.providerId || call.provider_id
 
     return (
         <motion.div
+            layout
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
-            className={`rounded-2xl border ${cfg.border} ${cfg.bg} overflow-hidden transition-all duration-300 ${call.status === 'booked' ? 'shadow-md shadow-emerald-100' : 'shadow-sm'
-                }`}
+            className={`rounded-2xl border ${cfg.border} ${cfg.bg} overflow-hidden transition-all duration-300 shadow-sm relative`}
         >
             <div className="p-4">
-                {/* Header row */}
-                <div className="flex items-start justify-between mb-2">
+                {/* Header */}
+                <div className="flex items-start justify-between mb-3">
                     <div className="flex items-center gap-3">
-                        {call.photo ? (
-                            <img src={call.photo} alt="" className="w-11 h-11 rounded-xl object-cover" />
-                        ) : (
-                            <div className={`w-11 h-11 rounded-xl flex items-center justify-center bg-slate-100`}>
-                                <Icon className={`w-5 h-5 ${cfg.iconColor} ${cfg.spin ? 'animate-spin' : ''} ${cfg.pulse ? 'animate-pulse' : ''}`} />
-                            </div>
-                        )}
+                        <div className="relative">
+                            {call.photo ? (
+                                <img src={call.photo} alt="" className="w-12 h-12 rounded-xl object-cover" />
+                            ) : (
+                                <div className={`w-12 h-12 rounded-xl flex items-center justify-center bg-white border border-slate-100`}>
+                                    <Icon className={`w-5 h-5 ${cfg.iconColor} ${cfg.spin ? 'animate-spin' : ''} ${cfg.pulse ? 'animate-pulse' : ''}`} />
+                                </div>
+                            )}
+                            {isActive && (
+                                <div className="absolute -bottom-1 -right-1 bg-green-500 w-3 h-3 rounded-full border-2 border-white animate-pulse" />
+                            )}
+                        </div>
                         <div>
-                            <p className="font-semibold text-slate-800 text-sm">{call.name || 'Provider'}</p>
-                            <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5">
+                            <h3 className="font-semibold text-slate-800 text-sm leading-tight">{call.name || 'Provider'}</h3>
+                            <div className="flex items-center gap-2 text-xs text-slate-400 mt-1">
                                 {call.rating > 0 && (
-                                    <span className="flex items-center gap-0.5">
+                                    <span className="flex items-center gap-0.5 text-slate-500">
                                         <Star className="w-3 h-3 text-amber-400 fill-amber-400" />{call.rating}
                                     </span>
                                 )}
-                                {call.distance < 999 && (
-                                    <span className="flex items-center gap-0.5"><MapPin className="w-3 h-3" />{call.distance}mi</span>
+                                <span>•</span>
+                                <span>{call.distance}mi</span>
+                                {isActive && (
+                                    <>
+                                        <span>•</span>
+                                        <span className="font-mono text-slate-500">{fmtTime(duration)}</span>
+                                    </>
                                 )}
                             </div>
                         </div>
                     </div>
-
-                    <span className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${cfg.labelBg}`}>
-                        <Icon className={`w-3 h-3 ${cfg.spin ? 'animate-spin' : ''} ${cfg.pulse ? 'animate-pulse' : ''}`} />
+                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${cfg.labelBg}`}>
                         {cfg.label}
                     </span>
                 </div>
 
-                {/* Booked slot */}
-                {call.status === 'booked' && call.slot && (
-                    <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-                        className="bg-emerald-50 rounded-xl p-3 mb-3 border border-emerald-100"
-                    >
-                        <p className="text-sm font-semibold text-emerald-700">
-                            📅 {call.slot.date} at {call.slot.time}
-                        </p>
-                        {call.serviceType && <p className="text-xs text-emerald-600 mt-0.5">{call.serviceType}</p>}
-                        {onConfirm && (
-                            <button onClick={onConfirm}
-                                className="mt-2 w-full py-1.5 bg-emerald-500 text-white text-xs font-medium rounded-lg hover:bg-emerald-600 transition">
-                                ✓ Confirm This Booking
-                            </button>
-                        )}
-                    </motion.div>
-                )}
-
-                {/* Score bar */}
-                {call.score && call.score > 0 && (
-                    <div className="mb-3">
-                        <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                            <span>Match Score</span>
-                            <span className="font-semibold text-slate-600">{Math.round(call.score * 100)}%</span>
+                {/* Live Score Bar */}
+                {(score > 0 || call.offeredSlot) && (
+                    <div className="mb-3 bg-white/50 rounded-lg p-2 border border-slate-100">
+                        <div className="flex items-center justify-between text-xs mb-1.5">
+                            <span className="font-medium text-slate-600">
+                                {call.offeredSlot ? 'Offer Received' : 'Predicted Match'}
+                            </span>
+                            <span className={`font-bold ${score > 0.8 ? 'text-emerald-600' : 'text-blue-600'}`}>
+                                {Math.round(score * 100)}%
+                            </span>
                         </div>
-                        <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                            <motion.div initial={{ width: 0 }} animate={{ width: `${call.score * 100}%` }}
-                                transition={{ duration: 0.8, ease: 'easeOut' }}
-                                className="h-full bg-gradient-to-r from-sky-400 to-emerald-400 rounded-full"
+                        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                            <motion.div
+                                initial={{ width: 0 }}
+                                animate={{ width: `${score * 100}%` }}
+                                className={`h-full rounded-full ${score > 0.8 ? 'bg-emerald-500' : 'bg-blue-500'}`}
                             />
                         </div>
+                        {call.isBest && (
+                            <p className="text-[10px] text-emerald-600 font-medium mt-1 flex items-center gap-1">
+                                <Star className="w-3 h-3 fill-emerald-600" />
+                                Current Best Option
+                            </p>
+                        )}
+                        {call.offeredSlot && (
+                            <p className="text-xs text-slate-700 mt-1 font-medium bg-emerald-100/50 px-2 py-1 rounded inline-block">
+                                📅 {call.offeredSlot.date} @ {call.offeredSlot.time}
+                            </p>
+                        )}
                     </div>
                 )}
 
-                {/* Reason for no availability */}
-                {call.status === 'no_availability' && call.reason && (
-                    <p className="text-xs text-red-400 italic">"{call.reason}"</p>
+                {/* Live Transcript Area */}
+                <div className="bg-white rounded-xl border border-slate-100 h-32 overflow-y-auto p-2 mb-3 text-xs space-y-2 relative" ref={scrollRef}>
+                    {(!call.transcript || call.transcript.length === 0) && (
+                        <div className="h-full flex items-center justify-center text-slate-300 italic">
+                            {isActive ? 'Listening...' : 'No transcript'}
+                        </div>
+                    )}
+                    {call.transcript?.map((t, i) => (
+                        <div key={i} className={`flex gap-2 ${t.role === 'agent' ? 'flex-row' : 'flex-row-reverse'}`}>
+                            <div className={`p-2 rounded-lg max-w-[85%] ${t.role === 'agent'
+                                ? 'bg-slate-50 text-slate-600 rounded-tl-none'
+                                : 'bg-blue-50 text-blue-700 rounded-tr-none'
+                                }`}>
+                                {t.message}
+                            </div>
+                        </div>
+                    ))}
+                    {isActive && (
+                        <div className="flex gap-1 items-center text-slate-300 text-[10px] animate-pulse pl-1">
+                            <span>●</span><span>●</span><span>●</span>
+                        </div>
+                    )}
+                </div>
+
+                {/* User Controls */}
+                {isActive && (
+                    <div className="grid grid-cols-2 gap-2">
+                        <button
+                            onClick={() => setShowInput(!showInput)}
+                            className="flex items-center justify-center gap-1.5 py-1.5 px-3 bg-white border border-slate-200 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition"
+                        >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            {showInput ? 'Cancel' : 'Instruct'}
+                        </button>
+                        <button
+                            onClick={handleDisconnect}
+                            disabled={isDisconnecting}
+                            className="flex items-center justify-center gap-1.5 py-1.5 px-3 bg-white border border-red-100 rounded-lg text-xs font-medium text-red-500 hover:bg-red-50 hover:border-red-200 transition"
+                        >
+                            {isDisconnecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PhoneOff className="w-3.5 h-3.5" />}
+                            End Call
+                        </button>
+                    </div>
                 )}
 
-                {/* Error */}
-                {call.status === 'failed' && call.error && (
-                    <p className="text-xs text-red-400">{call.error}</p>
+                {/* Instruction Input */}
+                <AnimatePresence>
+                    {showInput && isActive && (
+                        <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden mt-2"
+                        >
+                            <div className="flex gap-2">
+                                <input
+                                    type="text"
+                                    value={instruction}
+                                    onChange={(e) => setInstruction(e.target.value)}
+                                    placeholder="Ex: Ask for Saturday..."
+                                    className="flex-1 text-xs border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-400"
+                                    autoFocus
+                                    onKeyDown={(e) => e.key === 'Enter' && handleSendInstruction()}
+                                />
+                                <button
+                                    onClick={handleSendInstruction}
+                                    className="bg-blue-500 text-white rounded-lg p-1.5 hover:bg-blue-600"
+                                >
+                                    <Send className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
+                {/* User Instruction Feedback */}
+                {call.userInstruction && (
+                    <div className="mt-2 text-[10px] text-slate-400 bg-slate-50 px-2 py-1 rounded flex items-center gap-1">
+                        <Mic className="w-3 h-3" /> Instruction sent: "{call.userInstruction}"
+                    </div>
                 )}
 
-                {/* Expand transcript */}
-                {(hasTranscript || ['connected', 'negotiating', 'booked', 'completed'].includes(call.status)) && (
-                    <button onClick={() => setExpanded(!expanded)}
-                        className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-600 transition mt-2"
-                    >
-                        {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                        {hasTranscript ? `View Transcript (${call.transcript.length} messages)` : 'Waiting for transcript...'}
+                {/* Confirm Button (if Booked) */}
+                {call.status === 'booked' && onConfirm && (
+                    <button onClick={onConfirm} className="w-full mt-3 py-2 bg-emerald-500 text-white rounded-xl text-sm font-semibold hover:bg-emerald-600 shadow-sm shadow-emerald-200 transition">
+                        Confirm Booking
                     </button>
                 )}
             </div>
-
-            {/* Transcript panel */}
-            <AnimatePresence>
-                {expanded && (
-                    <motion.div
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: 'auto', opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        className="border-t border-slate-100 bg-slate-50/50"
-                    >
-                        <TranscriptView transcript={call.transcript || []} />
-                    </motion.div>
-                )}
-            </AnimatePresence>
         </motion.div>
     )
 }
+
