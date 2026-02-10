@@ -39,7 +39,7 @@ graph TD
 
     subgraph "AI Core"
         11Labs[ElevenLabs Conversational AI]
-        LLM[LLM Brain (Groq/OpenAI)]
+        LLM["LLM Brain (Groq/OpenAI)"]
     end
 
     subgraph "External Tools"
@@ -86,7 +86,6 @@ sequenceDiagram
                 AI->>Provider: "That works. Please book it."
                 AI->>Tools: create_booking_event()
                 AI->>User: "Appointment Confirmed!"
-                break
             else Slot Busy
                 Tools-->>AI: "Slot Busy"
                 AI->>Provider: "Actually, how about 4 PM?"
